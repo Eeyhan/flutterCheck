@@ -13,20 +13,22 @@ AssetManager::AssetManager() = default;
 
 AssetManager::~AssetManager() = default;
 
-void AssetManager::PushFront(std::unique_ptr<AssetResolver> resolver) {
+bool AssetManager::PushFront(std::unique_ptr<AssetResolver> resolver) {
   if (resolver == nullptr || !resolver->IsValid()) {
-    return;
+    return false;
   }
 
   resolvers_.push_front(std::move(resolver));
+  return true;
 }
 
-void AssetManager::PushBack(std::unique_ptr<AssetResolver> resolver) {
+bool AssetManager::PushBack(std::unique_ptr<AssetResolver> resolver) {
   if (resolver == nullptr || !resolver->IsValid()) {
-    return;
+    return false;
   }
 
   resolvers_.push_back(std::move(resolver));
+  return true;
 }
 
 void AssetManager::UpdateResolverByType(
@@ -107,6 +109,23 @@ bool AssetManager::IsValidAfterAssetManagerChange() const {
 // |AssetResolver|
 AssetResolver::AssetResolverType AssetManager::GetType() const {
   return AssetResolverType::kAssetManager;
+}
+
+bool AssetManager::operator==(const AssetResolver& other) const {
+  const AssetManager* other_manager = other.as_asset_manager();
+  if (!other_manager) {
+    return false;
+  }
+  if (resolvers_.size() != other_manager->resolvers_.size()) {
+    return false;
+  }
+
+  for (size_t i = 0; i < resolvers_.size(); i++) {
+    if (*resolvers_[i] != *other_manager->resolvers_[i]) {
+      return false;
+    }
+  }
+  return true;
 }
 
 }  // namespace flutter

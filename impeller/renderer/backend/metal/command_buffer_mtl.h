@@ -2,43 +2,60 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#pragma once
+#ifndef FLUTTER_IMPELLER_RENDERER_BACKEND_METAL_COMMAND_BUFFER_MTL_H_
+#define FLUTTER_IMPELLER_RENDERER_BACKEND_METAL_COMMAND_BUFFER_MTL_H_
 
 #include <Metal/Metal.h>
 
-#include "flutter/fml/macros.h"
+#include "impeller/core/allocator.h"
 #include "impeller/renderer/command_buffer.h"
 
 namespace impeller {
 
 class CommandBufferMTL final : public CommandBuffer {
  public:
-  CommandBufferMTL();
-
   // |CommandBuffer|
   ~CommandBufferMTL() override;
 
  private:
   friend class ContextMTL;
 
-  id<MTLCommandBuffer> buffer_ = nullptr;
+  id<MTLCommandBuffer> buffer_ = nil;
+  id<MTLDevice> device_ = nil;
 
-  CommandBufferMTL(id<MTLCommandQueue> queue);
+  CommandBufferMTL(const std::weak_ptr<const Context>& context,
+                   id<MTLDevice> device,
+                   id<MTLCommandQueue> queue);
 
   // |CommandBuffer|
-  void SetLabel(const std::string& label) const override;
+  void SetLabel(std::string_view label) const override;
 
   // |CommandBuffer|
   bool IsValid() const override;
 
   // |CommandBuffer|
-  bool SubmitCommands(CompletionCallback callback) override;
+  bool OnSubmitCommands(CompletionCallback callback) override;
 
   // |CommandBuffer|
-  std::shared_ptr<RenderPass> OnCreateRenderPass(
-      RenderTarget target) const override;
+  void OnWaitUntilCompleted() override;
 
-  FML_DISALLOW_COPY_AND_ASSIGN(CommandBufferMTL);
+  // |CommandBuffer|
+  void OnWaitUntilScheduled() override;
+
+  // |CommandBuffer|
+  std::shared_ptr<RenderPass> OnCreateRenderPass(RenderTarget target) override;
+
+  // |CommandBuffer|
+  std::shared_ptr<BlitPass> OnCreateBlitPass() override;
+
+  // |CommandBuffer|
+  std::shared_ptr<ComputePass> OnCreateComputePass() override;
+
+  CommandBufferMTL(const CommandBufferMTL&) = delete;
+
+  CommandBufferMTL& operator=(const CommandBufferMTL&) = delete;
 };
 
 }  // namespace impeller
+
+#endif  // FLUTTER_IMPELLER_RENDERER_BACKEND_METAL_COMMAND_BUFFER_MTL_H_

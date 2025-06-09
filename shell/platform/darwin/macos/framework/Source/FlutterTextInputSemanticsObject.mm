@@ -91,12 +91,18 @@
 #pragma mark - NSView
 
 - (NSRect)frame {
+  if (!_node) {
+    return NSZeroRect;
+  }
   return _node->GetFrame();
 }
 
 #pragma mark - NSAccessibilityProtocol
 
 - (void)setAccessibilityFocused:(BOOL)isFocused {
+  if (!_node) {
+    return;
+  }
   [super setAccessibilityFocused:isFocused];
   ui::AXActionData data;
   data.action = isFocused ? ax::mojom::Action::kFocus : ax::mojom::Action::kBlur;
@@ -108,6 +114,9 @@
     return;
   }
   if (self.currentEditor == _plugin) {
+    return;
+  }
+  if (!_node) {
     return;
   }
   // Selecting text seems to be the only way to make the field editor
@@ -131,6 +140,10 @@
     selection = NSMakeRange([self stringValue].length, 0);
   }
   [self updateString:textValue withSelection:selection];
+}
+
+- (void)setPlatformNode:(flutter::FlutterTextPlatformNode*)node {
+  _node = node;
 }
 
 #pragma mark - NSObject
@@ -159,6 +172,7 @@ FlutterTextPlatformNode::FlutterTextPlatformNode(FlutterPlatformNodeDelegate* de
 }
 
 FlutterTextPlatformNode::~FlutterTextPlatformNode() {
+  [appkit_text_field_ setPlatformNode:nil];
   EnsureDetachedFromView();
 }
 
@@ -176,6 +190,9 @@ NSRect FlutterTextPlatformNode::GetFrame() {
   FlutterPlatformNodeDelegate* delegate = static_cast<FlutterPlatformNodeDelegate*>(GetDelegate());
   bool offscreen;
   auto bridge_ptr = delegate->GetOwnerBridge().lock();
+  if (!bridge_ptr) {
+    return NSZeroRect;
+  }
   gfx::RectF bounds = bridge_ptr->RelativeToGlobalBounds(delegate->GetAXNode(), offscreen, true);
 
   // Converts to NSRect to use NSView rect conversion.

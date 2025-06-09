@@ -4,10 +4,13 @@
 
 #include "flutter/shell/platform/embedder/tests/embedder_test_compositor_vulkan.h"
 
+#include <utility>
+
 #include "flutter/fml/logging.h"
 #include "flutter/shell/platform/embedder/tests/embedder_assertions.h"
-#include "flutter/shell/platform/embedder/tests/embedder_test_backingstore_producer.h"
+#include "flutter/shell/platform/embedder/tests/embedder_test_backingstore_producer_vulkan.h"
 #include "third_party/skia/include/core/SkSurface.h"
+#include "third_party/skia/include/gpu/ganesh/SkSurfaceGanesh.h"
 
 namespace flutter {
 namespace testing {
@@ -15,9 +18,30 @@ namespace testing {
 EmbedderTestCompositorVulkan::EmbedderTestCompositorVulkan(
     SkISize surface_size,
     sk_sp<GrDirectContext> context)
-    : EmbedderTestCompositor(surface_size, context) {}
+    : EmbedderTestCompositor(surface_size, std::move(context)) {}
 
 EmbedderTestCompositorVulkan::~EmbedderTestCompositorVulkan() = default;
+
+void EmbedderTestCompositorVulkan::SetRenderTargetType(
+    EmbedderTestBackingStoreProducer::RenderTargetType type,
+    FlutterSoftwarePixelFormat software_pixfmt) {
+  switch (type) {
+    case EmbedderTestBackingStoreProducer::RenderTargetType::kVulkanImage:
+      backingstore_producer_ =
+          std::make_unique<EmbedderTestBackingStoreProducerVulkan>(context_,
+                                                                   type);
+      return;
+    case EmbedderTestBackingStoreProducer::RenderTargetType::kMetalTexture:
+    case EmbedderTestBackingStoreProducer::RenderTargetType::kOpenGLFramebuffer:
+    case EmbedderTestBackingStoreProducer::RenderTargetType::kOpenGLSurface:
+    case EmbedderTestBackingStoreProducer::RenderTargetType::kOpenGLTexture:
+    case EmbedderTestBackingStoreProducer::RenderTargetType::kSoftwareBuffer:
+    case EmbedderTestBackingStoreProducer::RenderTargetType::kSoftwareBuffer2:
+      FML_LOG(FATAL) << "Unsupported render target type: "
+                     << static_cast<int>(type);
+      return;
+  }
+}
 
 bool EmbedderTestCompositorVulkan::UpdateOffscrenComposition(
     const FlutterLayer** layers,
@@ -27,13 +51,13 @@ bool EmbedderTestCompositorVulkan::UpdateOffscrenComposition(
   const auto image_info = SkImageInfo::MakeN32Premul(surface_size_);
 
   sk_sp<SkSurface> surface =
-      SkSurface::MakeRenderTarget(context_.get(),            // context
-                                  SkBudgeted::kNo,           // budgeted
-                                  image_info,                // image info
-                                  1,                         // sample count
-                                  kTopLeft_GrSurfaceOrigin,  // surface origin
-                                  nullptr,  // surface properties
-                                  false     // create mipmaps
+      SkSurfaces::RenderTarget(context_.get(),            // context
+                               skgpu::Budgeted::kNo,      // budgeted
+                               image_info,                // image info
+                               1,                         // sample count
+                               kTopLeft_GrSurfaceOrigin,  // surface origin
+                               nullptr,                   // surface properties
+                               false                      // create mipmaps
       );
 
   if (!surface) {
@@ -58,9 +82,7 @@ bool EmbedderTestCompositorVulkan::UpdateOffscrenComposition(
     switch (layer->type) {
       case kFlutterLayerContentTypeBackingStore:
         layer_image =
-            reinterpret_cast<EmbedderTestBackingStoreProducer::UserData*>(
-                layer->backing_store->user_data)
-                ->surface->makeImageSnapshot();
+            backingstore_producer_->MakeImageSnapshot(layer->backing_store);
         break;
       case kFlutterLayerContentTypePlatformView:
         layer_image =

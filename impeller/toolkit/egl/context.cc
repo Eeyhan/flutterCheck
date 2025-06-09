@@ -72,7 +72,7 @@ bool Context::ClearCurrent() const {
 }
 
 std::optional<UniqueID> Context::AddLifecycleListener(
-    LifecycleListener listener) {
+    const LifecycleListener& listener) {
   if (!listener) {
     return std::nullopt;
   }
@@ -97,6 +97,10 @@ void Context::DispatchLifecyleEvent(LifecycleEvent event) const {
   for (const auto& listener : listeners_) {
     listener.second(event);
   }
+}
+
+bool Context::IsCurrent() const {
+  return ::eglGetCurrentContext() == context_;
 }
 
 }  // namespace egl

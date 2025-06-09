@@ -1,4 +1,10 @@
+// Copyright 2013 The Flutter Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
 package io.flutter.embedding.android;
+
+import static org.robolectric.util.reflector.Reflector.reflector;
 
 import android.content.res.Resources;
 import android.graphics.Color;
@@ -8,21 +14,34 @@ import androidx.annotation.Nullable;
 import org.robolectric.annotation.Implementation;
 import org.robolectric.annotation.Implements;
 import org.robolectric.annotation.RealObject;
-import org.robolectric.shadow.api.Shadow;
+import org.robolectric.shadows.ShadowResources;
+import org.robolectric.util.reflector.Direct;
+import org.robolectric.util.reflector.ForType;
 
+@SuppressWarnings("deprecation")
+// getDrawableInt
 @Implements(Resources.class)
-public class SplashShadowResources {
+public class SplashShadowResources extends ShadowResources {
   @RealObject private Resources resources;
 
   public static final int SPLASH_DRAWABLE_ID = 191919;
   public static final int THEMED_SPLASH_DRAWABLE_ID = 212121;
+
+  @ForType(Resources.class)
+  interface ResourcesReflector {
+    @Direct
+    Drawable getDrawable(int id, Resources.Theme theme);
+
+    @Direct
+    Drawable getDrawable(int id);
+  }
 
   @Implementation
   protected Drawable getDrawable(int id) {
     if (id == SPLASH_DRAWABLE_ID) {
       return new ColorDrawable(Color.BLUE);
     }
-    return Shadow.directlyOn(resources, Resources.class).getDrawable(id);
+    return reflector(Resources.class, resources).getDrawable(id);
   }
 
   @Implementation
@@ -36,6 +55,6 @@ public class SplashShadowResources {
       }
       return new ColorDrawable(Color.GRAY);
     }
-    return Shadow.directlyOn(resources, Resources.class).getDrawable(id, theme);
+    return reflector(Resources.class, resources).getDrawable(id, theme);
   }
 }

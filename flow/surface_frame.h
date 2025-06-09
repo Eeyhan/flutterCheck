@@ -9,11 +9,17 @@
 #include <optional>
 
 #include "flutter/common/graphics/gl_context_switch.h"
-#include "flutter/display_list/display_list_canvas_recorder.h"
+#include "flutter/display_list/dl_builder.h"
+#include "flutter/display_list/skia/dl_sk_canvas.h"
 #include "flutter/fml/macros.h"
 #include "flutter/fml/time/time_point.h"
+
 #include "third_party/skia/include/core/SkCanvas.h"
 #include "third_party/skia/include/core/SkSurface.h"
+
+namespace impeller {
+class Surface;
+}
 
 namespace flutter {
 
@@ -21,8 +27,9 @@ namespace flutter {
 // underlying client rendering API. A frame may only be submitted once.
 class SurfaceFrame {
  public:
-  using SubmitCallback =
-      std::function<bool(SurfaceFrame& surface_frame, SkCanvas* canvas)>;
+  using EncodeCallback =
+      std::function<bool(SurfaceFrame& surface_frame, DlCanvas* canvas)>;
+  using SubmitCallback = std::function<bool(SurfaceFrame& surface_frame)>;
 
   // Information about the underlying framebuffer
   struct FramebufferInfo {
@@ -51,12 +58,14 @@ class SurfaceFrame {
     // If existing damage is unspecified (nullopt), entire frame will be
     // rasterized (no partial redraw). To signal that there is no existing
     // damage use an empty SkIRect.
-    std::optional<SkIRect> existing_damage;
+    std::optional<SkIRect> existing_damage = std::nullopt;
   };
 
   SurfaceFrame(sk_sp<SkSurface> surface,
                FramebufferInfo framebuffer_info,
+               const EncodeCallback& encode_callback,
                const SubmitCallback& submit_callback,
+               SkISize frame_size,
                std::unique_ptr<GLContextResult> context_result = nullptr,
                bool display_list_fallback = false);
 
@@ -77,7 +86,29 @@ class SurfaceFrame {
     // Time at which this frame is scheduled to be presented. This is a hint
     // that can be passed to the platform to drop queued frames.
     std::optional<fml::TimePoint> presentation_time;
+
+    // Whether this surface frame represents the last in a group frames that
+    // were submitted as part of a platform compositor interop step, such as
+    // during iOS platform view compositing.
+    //
+    // Defaults to true, which is generally a safe value.
+    bool frame_boundary = true;
+
+    // Whether this surface presents with a CATransaction on Apple platforms.
+    //
+    // When there are platform views in the scene, the drawable needs to be
+    // presented in the same CATransaction as the one created for platform view
+    // mutations.
+    //
+    // If the drawables are being presented from the raster thread, we cannot
+    // use a transaction as it will dirty the UIViews being presented. If there
+    // is a non-Flutter UIView active, such as in add2app or a
+    // presentViewController page transition, then this will cause CoreAnimation
+    // assertion errors and exit the app.
+    bool present_with_transaction = false;
   };
+
+  bool Encode();
 
   bool Submit();
 
@@ -85,7 +116,7 @@ class SurfaceFrame {
 
   sk_sp<SkSurface> SkiaSurface() const;
 
-  SkCanvas* SkiaCanvas();
+  DlCanvas* Canvas();
 
   const FramebufferInfo& framebuffer_info() const { return framebuffer_info_; }
 
@@ -94,22 +125,36 @@ class SurfaceFrame {
   }
   const SubmitInfo& submit_info() const { return submit_info_; }
 
-  sk_sp<DisplayListBuilder> GetDisplayListBuilder();
-
   sk_sp<DisplayList> BuildDisplayList();
+
+  void set_user_data(std::shared_ptr<impeller::Surface> data) {
+    user_data_ = std::move(data);
+  }
+
+  std::shared_ptr<impeller::Surface> take_user_data() {
+    return std::move(user_data_);
+  }
 
  private:
   bool submitted_ = false;
+  bool encoded_ = false;
 
-  sk_sp<DisplayListCanvasRecorder> dl_recorder_;
+#if !SLIMPELLER
+  DlSkCanvasAdapter adapter_;
+#endif  //  !SLIMPELLER
+  sk_sp<DisplayListBuilder> dl_builder_;
   sk_sp<SkSurface> surface_;
-  SkCanvas* canvas_ = nullptr;
+  DlCanvas* canvas_ = nullptr;
   FramebufferInfo framebuffer_info_;
   SubmitInfo submit_info_;
+  EncodeCallback encode_callback_;
   SubmitCallback submit_callback_;
+  std::shared_ptr<impeller::Surface> user_data_;
   std::unique_ptr<GLContextResult> context_result_;
 
   bool PerformSubmit();
+
+  bool PerformEncode();
 
   FML_DISALLOW_COPY_AND_ASSIGN(SurfaceFrame);
 };

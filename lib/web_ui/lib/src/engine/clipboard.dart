@@ -3,11 +3,10 @@
 // found in the LICENSE file.
 
 import 'package:ui/ui.dart' as ui;
+import 'package:ui/ui_web/src/ui_web.dart' as ui_web;
 
-import 'browser_detection.dart';
 import 'dom.dart';
 import 'services.dart';
-import 'util.dart';
 
 /// Handles clipboard related platform messages.
 class ClipboardMessageHandler {
@@ -24,7 +23,7 @@ class ClipboardMessageHandler {
     const MethodCodec codec = JSONMethodCodec();
     bool errorEnvelopeEncoded = false;
     _copyToClipboardStrategy
-        .setData(methodCall.arguments['text'] as String?)
+        .setData((methodCall.arguments as Map<String, Object?>)['text'] as String?)
         .then((bool success) {
       if (success) {
         callback!(codec.encodeSuccessEnvelope(true));
@@ -66,6 +65,31 @@ class ClipboardMessageHandler {
     });
   }
 
+  /// Handles the platform message which asks if the clipboard contains
+  /// pasteable strings.
+  void hasStringsMethodCall(ui.PlatformMessageResponseCallback? callback) {
+    const MethodCodec codec = JSONMethodCodec();
+    _pasteFromClipboardStrategy.getData().then((String data) {
+      final Map<String, dynamic> map = <String, dynamic>{'value': data.isNotEmpty};
+      callback!(codec.encodeSuccessEnvelope(map));
+    }).catchError((dynamic error) {
+      if (error is UnimplementedError) {
+        // Clipboard.hasStrings not supported.
+        // Passing [null] to [callback] indicates that the platform message isn't
+        // implemented. Look at [MethodChannel.invokeMethod] to see how [null] is
+        // handled.
+        Future<void>.delayed(Duration.zero).then((_) {
+          if (callback != null) {
+            callback(null);
+          }
+        });
+        return;
+      }
+      final Map<String, dynamic> map = <String, dynamic>{'value': false};
+      callback!(codec.encodeSuccessEnvelope(map));
+    });
+  }
+
   void _reportGetDataFailure(ui.PlatformMessageResponseCallback? callback,
       MethodCodec codec, dynamic error) {
     print('Could not get text from clipboard: $error');
@@ -89,7 +113,7 @@ class ClipboardMessageHandler {
 /// APIs and the browser.
 abstract class CopyToClipboardStrategy {
   factory CopyToClipboardStrategy() {
-    return !unsafeIsNull(domWindow.navigator.clipboard)
+    return domWindow.navigator.clipboard != null
         ? ClipboardAPICopyStrategy()
         : ExecCommandCopyStrategy();
   }
@@ -108,8 +132,8 @@ abstract class CopyToClipboardStrategy {
 /// APIs and the browser.
 abstract class PasteFromClipboardStrategy {
   factory PasteFromClipboardStrategy() {
-    return (browserEngine == BrowserEngine.firefox ||
-            unsafeIsNull(domWindow.navigator.clipboard))
+    return (ui_web.browser.browserEngine == ui_web.BrowserEngine.firefox ||
+            domWindow.navigator.clipboard == null)
         ? ExecCommandPasteStrategy()
         : ClipboardAPIPasteStrategy();
   }
@@ -160,7 +184,7 @@ class ExecCommandCopyStrategy implements CopyToClipboardStrategy {
     // See: https://developers.google.com/web/updates/2015/04/cut-and-copy-commands
     final DomHTMLTextAreaElement tempTextArea = _appendTemporaryTextArea();
     tempTextArea.value = text;
-    tempTextArea.focus();
+    tempTextArea.focusWithoutScroll();
     tempTextArea.select();
     bool result = false;
     try {

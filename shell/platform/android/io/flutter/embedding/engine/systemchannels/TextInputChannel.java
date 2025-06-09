@@ -1,5 +1,7 @@
 package io.flutter.embedding.engine.systemchannels;
 
+import static io.flutter.Build.API_LEVELS;
+
 import android.os.Build;
 import android.os.Bundle;
 import android.view.View;
@@ -16,6 +18,7 @@ import io.flutter.plugin.editing.TextEditingDelta;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import org.json.JSONArray;
@@ -325,6 +328,14 @@ public class TextInputChannel {
         Arrays.asList(inputClientId, "TextInputAction.unspecified"));
   }
 
+  /** Instructs Flutter to commit inserted content back to the text channel. */
+  public void commitContent(int inputClientId, Map<String, Object> content) {
+    Log.v(TAG, "Sending 'commitContent' message.");
+    channel.invokeMethod(
+        "TextInputClient.performAction",
+        Arrays.asList(inputClientId, "TextInputAction.commitContent", content));
+  }
+
   public void performPrivateCommand(
       int inputClientId, @NonNull String action, @NonNull Bundle data) {
     HashMap<Object, Object> json = new HashMap<>();
@@ -454,6 +465,19 @@ public class TextInputChannel {
         }
       }
       final Integer inputAction = inputActionFromTextInputAction(inputActionName);
+
+      // Build list of content commit mime types from the data in the JSON list.
+      List<String> contentList = new ArrayList<String>();
+      JSONArray contentCommitMimeTypes =
+          json.isNull("contentCommitMimeTypes")
+              ? null
+              : json.getJSONArray("contentCommitMimeTypes");
+      if (contentCommitMimeTypes != null) {
+        for (int i = 0; i < contentCommitMimeTypes.length(); i++) {
+          contentList.add(contentCommitMimeTypes.optString(i));
+        }
+      }
+
       return new Configuration(
           json.optBoolean("obscureText"),
           json.optBoolean("autocorrect", true),
@@ -465,6 +489,7 @@ public class TextInputChannel {
           inputAction,
           json.isNull("actionLabel") ? null : json.getString("actionLabel"),
           json.isNull("autofill") ? null : Autofill.fromJson(json.getJSONObject("autofill")),
+          contentList.toArray(new String[contentList.size()]),
           fields);
     }
 
@@ -519,7 +544,7 @@ public class TextInputChannel {
 
       @NonNull
       private static String translateAutofillHint(@NonNull String hint) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+        if (Build.VERSION.SDK_INT < API_LEVELS.API_26) {
           return hint;
         }
         switch (hint) {
@@ -622,6 +647,7 @@ public class TextInputChannel {
     @Nullable public final Integer inputAction;
     @Nullable public final String actionLabel;
     @Nullable public final Autofill autofill;
+    @Nullable public final String[] contentCommitMimeTypes;
     @Nullable public final Configuration[] fields;
 
     public Configuration(
@@ -635,6 +661,7 @@ public class TextInputChannel {
         @Nullable Integer inputAction,
         @Nullable String actionLabel,
         @Nullable Autofill autofill,
+        @Nullable String[] contentCommitMimeTypes,
         @Nullable Configuration[] fields) {
       this.obscureText = obscureText;
       this.autocorrect = autocorrect;
@@ -646,6 +673,7 @@ public class TextInputChannel {
       this.inputAction = inputAction;
       this.actionLabel = actionLabel;
       this.autofill = autofill;
+      this.contentCommitMimeTypes = contentCommitMimeTypes;
       this.fields = fields;
     }
   }
@@ -689,7 +717,8 @@ public class TextInputChannel {
     EMAIL_ADDRESS("TextInputType.emailAddress"),
     URL("TextInputType.url"),
     VISIBLE_PASSWORD("TextInputType.visiblePassword"),
-    NONE("TextInputType.none");
+    NONE("TextInputType.none"),
+    WEB_SEARCH("TextInputType.webSearch");
 
     static TextInputType fromValue(@NonNull String encodedName) throws NoSuchFieldException {
       for (TextInputType textInputType : TextInputType.values()) {

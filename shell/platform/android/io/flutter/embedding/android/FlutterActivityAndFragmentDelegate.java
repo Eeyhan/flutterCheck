@@ -7,7 +7,9 @@ package io.flutter.embedding.android;
 import static android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW;
 import static io.flutter.embedding.android.FlutterActivityLaunchConfigs.DEFAULT_INITIAL_ROUTE;
 
+import android.annotation.TargetApi;
 import android.app.Activity;
+import android.content.ComponentCallbacks2;
 import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
@@ -16,19 +18,24 @@ import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewTreeObserver.OnPreDrawListener;
+import android.window.BackEvent;
+import android.window.OnBackAnimationCallback;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.annotation.RequiresApi;
 import androidx.annotation.VisibleForTesting;
 import androidx.lifecycle.Lifecycle;
+import io.flutter.Build.API_LEVELS;
 import io.flutter.FlutterInjector;
 import io.flutter.Log;
 import io.flutter.embedding.engine.FlutterEngine;
 import io.flutter.embedding.engine.FlutterEngineCache;
+import io.flutter.embedding.engine.FlutterEngineGroup;
+import io.flutter.embedding.engine.FlutterEngineGroupCache;
 import io.flutter.embedding.engine.FlutterShellArgs;
 import io.flutter.embedding.engine.dart.DartExecutor;
 import io.flutter.embedding.engine.renderer.FlutterUiDisplayListener;
 import io.flutter.plugin.platform.PlatformPlugin;
-import io.flutter.util.ViewUtils;
 import java.util.Arrays;
 import java.util.List;
 
@@ -69,6 +76,7 @@ import java.util.List;
   private static final String TAG = "FlutterActivityAndFragmentDelegate";
   private static final String FRAMEWORK_RESTORATION_BUNDLE_KEY = "framework";
   private static final String PLUGINS_RESTORATION_BUNDLE_KEY = "plugins";
+  static final String ON_BACK_CALLBACK_ENABLED_KEY = "enableOnBackInvokedCallbackState";
   private static final int FLUTTER_SPLASH_VIEW_FALLBACK_ID = 486947586;
 
   /** Factory to obtain a FlutterActivityAndFragmentDelegate instance. */
@@ -87,6 +95,8 @@ import java.util.List;
   private boolean isFlutterUiDisplayed;
   private boolean isFirstFrameRendered;
   private boolean isAttached;
+  private Integer previousVisibility;
+  @Nullable private FlutterEngineGroup engineGroup;
 
   @NonNull
   private final FlutterUiDisplayListener flutterUiDisplayListener =
@@ -106,8 +116,13 @@ import java.util.List;
       };
 
   FlutterActivityAndFragmentDelegate(@NonNull Host host) {
+    this(host, null);
+  }
+
+  FlutterActivityAndFragmentDelegate(@NonNull Host host, @Nullable FlutterEngineGroup engineGroup) {
     this.host = host;
     this.isFirstFrameRendered = false;
+    this.engineGroup = engineGroup;
   }
 
   /**
@@ -177,7 +192,7 @@ import java.util.List;
     // When "retain instance" is true, the FlutterEngine will survive configuration
     // changes. Therefore, we create a new one only if one does not already exist.
     if (flutterEngine == null) {
-      setupFlutterEngine();
+      setUpFlutterEngine();
     }
 
     if (host.shouldAttachEngineToActivity()) {
@@ -217,6 +232,28 @@ import java.util.List;
     return activity;
   }
 
+  private FlutterEngineGroup.Options addEntrypointOptions(FlutterEngineGroup.Options options) {
+    String appBundlePathOverride = host.getAppBundlePath();
+    if (appBundlePathOverride == null || appBundlePathOverride.isEmpty()) {
+      appBundlePathOverride = FlutterInjector.instance().flutterLoader().findAppBundlePath();
+    }
+
+    DartExecutor.DartEntrypoint dartEntrypoint =
+        new DartExecutor.DartEntrypoint(
+            appBundlePathOverride, host.getDartEntrypointFunctionName());
+    String initialRoute = host.getInitialRoute();
+    if (initialRoute == null) {
+      initialRoute = maybeGetInitialRouteFromIntent(host.getActivity().getIntent());
+      if (initialRoute == null) {
+        initialRoute = DEFAULT_INITIAL_ROUTE;
+      }
+    }
+    return options
+        .setDartEntrypoint(dartEntrypoint)
+        .setInitialRoute(initialRoute)
+        .setDartEntrypointArgs(host.getDartEntrypointArgs());
+  }
+
   /**
    * Obtains a reference to a FlutterEngine to back this delegate and its {@code host}.
    *
@@ -229,11 +266,15 @@ import java.util.List;
    * <p>Second, the {@code host} is given an opportunity to provide a {@link
    * io.flutter.embedding.engine.FlutterEngine} via {@link Host#provideFlutterEngine(Context)}.
    *
+   * <p>Third, the {@code host} is asked if it would like to use a cached {@link
+   * io.flutter.embedding.engine.FlutterEngineGroup} to create a new {@link FlutterEngine} by {@link
+   * FlutterEngineGroup#createAndRunEngine}
+   *
    * <p>If the {@code host} does not provide a {@link io.flutter.embedding.engine.FlutterEngine},
    * then a new {@link FlutterEngine} is instantiated.
    */
   @VisibleForTesting
-  /* package */ void setupFlutterEngine() {
+  /* package */ void setUpFlutterEngine() {
     Log.v(TAG, "Setting up FlutterEngine.");
 
     // First, check if the host wants to use a cached FlutterEngine.
@@ -257,18 +298,43 @@ import java.util.List;
       return;
     }
 
+    // Third, check if the host wants to use a cached FlutterEngineGroup
+    // and create new FlutterEngine using FlutterEngineGroup#createAndRunEngine
+    String cachedEngineGroupId = host.getCachedEngineGroupId();
+    if (cachedEngineGroupId != null) {
+      FlutterEngineGroup flutterEngineGroup =
+          FlutterEngineGroupCache.getInstance().get(cachedEngineGroupId);
+      if (flutterEngineGroup == null) {
+        throw new IllegalStateException(
+            "The requested cached FlutterEngineGroup did not exist in the FlutterEngineGroupCache: '"
+                + cachedEngineGroupId
+                + "'");
+      }
+
+      flutterEngine =
+          flutterEngineGroup.createAndRunEngine(
+              addEntrypointOptions(new FlutterEngineGroup.Options(host.getContext())));
+      isFlutterEngineFromHost = false;
+      return;
+    }
+
     // Our host did not provide a custom FlutterEngine. Create a FlutterEngine to back our
     // FlutterView.
     Log.v(
         TAG,
         "No preferred FlutterEngine was provided. Creating a new FlutterEngine for"
             + " this FlutterFragment.");
+
+    FlutterEngineGroup group =
+        engineGroup == null
+            ? new FlutterEngineGroup(host.getContext(), host.getFlutterShellArgs().toArray())
+            : engineGroup;
     flutterEngine =
-        new FlutterEngine(
-            host.getContext(),
-            host.getFlutterShellArgs().toArray(),
-            /*automaticallyRegisterPlugins=*/ false,
-            /*willProvideRestorationData=*/ host.shouldRestoreAndSaveState());
+        group.createAndRunEngine(
+            addEntrypointOptions(
+                new FlutterEngineGroup.Options(host.getContext())
+                    .setAutomaticallyRegisterPlugins(false)
+                    .setWaitForRestorationData(host.shouldRestoreAndSaveState())));
     isFlutterEngineFromHost = false;
   }
 
@@ -284,9 +350,7 @@ import java.util.List;
    * with Android tools, such as "Displayed" timing printed with `am start`.
    *
    * <p>Note that it should only be set to true when {@code Host#getRenderMode()} is {@code
-   * RenderMode.surface}. This parameter is also ignored, disabling the delay should the legacy
-   * {@code Host#provideSplashScreen()} be non-null. See <a
-   * href="https://flutter.dev/go/android-splash-migration">Android Splash Migration</a>.
+   * RenderMode.surface}.
    *
    * <p>This method:
    *
@@ -333,23 +397,11 @@ import java.util.List;
     // Add listener to be notified when Flutter renders its first frame.
     flutterView.addOnFirstFrameRenderedListener(flutterUiDisplayListener);
 
-    Log.v(TAG, "Attaching FlutterEngine to FlutterView.");
-    flutterView.attachToFlutterEngine(flutterEngine);
-    flutterView.setId(flutterViewId);
-
-    SplashScreen splashScreen = host.provideSplashScreen();
-
-    if (splashScreen != null) {
-      Log.w(
-          TAG,
-          "A splash screen was provided to Flutter, but this is deprecated. See"
-              + " flutter.dev/go/android-splash-migration for migration steps.");
-      FlutterSplashView flutterSplashView = new FlutterSplashView(host.getContext());
-      flutterSplashView.setId(ViewUtils.generateViewId(FLUTTER_SPLASH_VIEW_FALLBACK_ID));
-      flutterSplashView.displayFlutterViewWithSplash(flutterView, splashScreen);
-
-      return flutterSplashView;
+    if (host.attachToEngineAutomatically()) {
+      Log.v(TAG, "Attaching FlutterEngine to FlutterView.");
+      flutterView.attachToFlutterEngine(flutterEngine);
     }
+    flutterView.setId(flutterViewId);
 
     if (shouldDelayFirstAndroidViewDraw) {
       delayFirstAndroidViewDraw(flutterView);
@@ -399,7 +451,9 @@ import java.util.List;
     // screen when unlocked. We can work around this by changing the visibility of FlutterView in
     // onStart and onStop.
     // See https://github.com/flutter/flutter/issues/93276
-    flutterView.setVisibility(View.VISIBLE);
+    if (previousVisibility != null) {
+      flutterView.setVisibility(previousVisibility);
+    }
   }
 
   /**
@@ -463,16 +517,7 @@ import java.util.List;
     if (host.shouldHandleDeeplinking()) {
       Uri data = intent.getData();
       if (data != null) {
-        String fullRoute = data.getPath();
-        if (fullRoute != null && !fullRoute.isEmpty()) {
-          if (data.getQuery() != null && !data.getQuery().isEmpty()) {
-            fullRoute += "?" + data.getQuery();
-          }
-          if (data.getFragment() != null && !data.getFragment().isEmpty()) {
-            fullRoute += "#" + data.getFragment();
-          }
-          return fullRoute;
-        }
+        return data.toString();
       }
     }
     return null;
@@ -519,7 +564,7 @@ import java.util.List;
   void onResume() {
     Log.v(TAG, "onResume()");
     ensureAlive();
-    if (host.shouldDispatchAppLifecycleState()) {
+    if (host.shouldDispatchAppLifecycleState() && flutterEngine != null) {
       flutterEngine.getLifecycleChannel().appIsResumed();
     }
   }
@@ -540,6 +585,7 @@ import java.util.List;
     ensureAlive();
     if (flutterEngine != null) {
       updateSystemUiOverlays();
+      flutterEngine.getPlatformViewsController().onResume();
     } else {
       Log.w(TAG, "onPostResume() invoked before FlutterFragment was attached to an Activity.");
     }
@@ -567,7 +613,7 @@ import java.util.List;
   void onPause() {
     Log.v(TAG, "onPause()");
     ensureAlive();
-    if (host.shouldDispatchAppLifecycleState()) {
+    if (host.shouldDispatchAppLifecycleState() && flutterEngine != null) {
       flutterEngine.getLifecycleChannel().appIsInactive();
     }
   }
@@ -590,7 +636,7 @@ import java.util.List;
     Log.v(TAG, "onStop()");
     ensureAlive();
 
-    if (host.shouldDispatchAppLifecycleState()) {
+    if (host.shouldDispatchAppLifecycleState() && flutterEngine != null) {
       flutterEngine.getLifecycleChannel().appIsPaused();
     }
 
@@ -599,7 +645,14 @@ import java.util.List;
     // screen when unlocked. We can work around this by changing the visibility of FlutterView in
     // onStart and onStop.
     // See https://github.com/flutter/flutter/issues/93276
+    previousVisibility = flutterView.getVisibility();
     flutterView.setVisibility(View.GONE);
+    if (flutterEngine != null) {
+      // When an Activity is stopped it won't have its onTrimMemory callback invoked. Normally,
+      // this isn't a problem but because of a bug in some builds of Android 14 we must act as
+      // if the onTrimMemory callback has been called.
+      flutterEngine.getRenderer().onTrimMemory(ComponentCallbacks2.TRIM_MEMORY_BACKGROUND);
+    }
   }
 
   /**
@@ -615,8 +668,13 @@ import java.util.List;
       flutterView.getViewTreeObserver().removeOnPreDrawListener(activePreDrawListener);
       activePreDrawListener = null;
     }
-    flutterView.detachFromFlutterEngine();
-    flutterView.removeOnFirstFrameRenderedListener(flutterUiDisplayListener);
+
+    // flutterView can be null in instances where a delegate.onDestroyView is called without
+    // onCreateView being called. See https://github.com/flutter/engine/pull/41082 for more detail.
+    if (flutterView != null) {
+      flutterView.detachFromFlutterEngine();
+      flutterView.removeOnFirstFrameRenderedListener(flutterUiDisplayListener);
+    }
   }
 
   void onSaveInstanceState(@Nullable Bundle bundle) {
@@ -633,6 +691,12 @@ import java.util.List;
       final Bundle plugins = new Bundle();
       flutterEngine.getActivityControlSurface().onSaveInstanceState(plugins);
       bundle.putBundle(PLUGINS_RESTORATION_BUNDLE_KEY, plugins);
+    }
+
+    // If using a cached engine, we need to save whether the framework or the system should handle
+    // backs.
+    if (host.getCachedEngineId() != null && !host.shouldDestroyEngineWithHost()) {
+      bundle.putBoolean(ON_BACK_CALLBACK_ENABLED_KEY, host.getBackCallbackState());
     }
   }
 
@@ -670,6 +734,10 @@ import java.util.List;
    * </ol>
    */
   void onDetach() {
+    if (!isAttached) {
+      // Already detached.
+      return;
+    }
     Log.v(TAG, "onDetach()");
     ensureAlive();
 
@@ -695,7 +763,7 @@ import java.util.List;
       platformPlugin = null;
     }
 
-    if (host.shouldDispatchAppLifecycleState()) {
+    if (host.shouldDispatchAppLifecycleState() && flutterEngine != null) {
       flutterEngine.getLifecycleChannel().appIsDetached();
     }
 
@@ -728,6 +796,100 @@ import java.util.List;
       flutterEngine.getNavigationChannel().popRoute();
     } else {
       Log.w(TAG, "Invoked onBackPressed() before FlutterFragment was attached to an Activity.");
+    }
+  }
+
+  /**
+   * Invoke this from {@link OnBackAnimationCallback#onBackStarted(BackEvent)}.
+   *
+   * <p>This method should be called when the back gesture is initiated. It should be invoked as
+   * part of the implementation of {@link OnBackAnimationCallback}.
+   *
+   * <p>This method delegates the handling of the start of a back gesture to the Flutter framework,
+   * which is responsible for the appropriate response, such as initiating animations or preparing
+   * the UI for the back navigation process.
+   *
+   * @param backEvent The BackEvent object containing information about the touch.
+   */
+  @TargetApi(API_LEVELS.API_34)
+  @RequiresApi(API_LEVELS.API_34)
+  void startBackGesture(@NonNull BackEvent backEvent) {
+    ensureAlive();
+    if (flutterEngine != null) {
+      Log.v(TAG, "Forwarding startBackGesture() to FlutterEngine.");
+      flutterEngine.getBackGestureChannel().startBackGesture(backEvent);
+    } else {
+      Log.w(TAG, "Invoked startBackGesture() before FlutterFragment was attached to an Activity.");
+    }
+  }
+
+  /**
+   * Invoke this from {@link OnBackAnimationCallback#onBackProgressed(BackEvent)}.
+   *
+   * <p>This method should be called in response to progress in a back gesture, as part of the
+   * implementation of {@link OnBackAnimationCallback}.
+   *
+   * <p>This method delegates to the Flutter framework to update UI elements or animations based on
+   * the progression of the back gesture.
+   *
+   * @param backEvent An BackEvent object describing the progress event.
+   */
+  @TargetApi(API_LEVELS.API_34)
+  @RequiresApi(API_LEVELS.API_34)
+  void updateBackGestureProgress(@NonNull BackEvent backEvent) {
+    ensureAlive();
+    if (flutterEngine != null) {
+      Log.v(TAG, "Forwarding updateBackGestureProgress() to FlutterEngine.");
+      flutterEngine.getBackGestureChannel().updateBackGestureProgress(backEvent);
+    } else {
+      Log.w(
+          TAG,
+          "Invoked updateBackGestureProgress() before FlutterFragment was attached to an Activity.");
+    }
+  }
+
+  /**
+   * Invoke this from {@link OnBackAnimationCallback#onBackInvoked()}.
+   *
+   * <p>This method is called to signify the completion of a back gesture and commits the navigation
+   * action initiated by the gesture. It should be invoked as the final step in handling a back
+   * gesture.
+   *
+   * <p>This method indicates to the Flutter framework that it should proceed with the back
+   * navigation, including finalizing animations and updating the UI to reflect the navigation
+   * outcome.
+   */
+  @TargetApi(API_LEVELS.API_34)
+  @RequiresApi(API_LEVELS.API_34)
+  void commitBackGesture() {
+    ensureAlive();
+    if (flutterEngine != null) {
+      Log.v(TAG, "Forwarding commitBackGesture() to FlutterEngine.");
+      flutterEngine.getBackGestureChannel().commitBackGesture();
+    } else {
+      Log.w(TAG, "Invoked commitBackGesture() before FlutterFragment was attached to an Activity.");
+    }
+  }
+
+  /**
+   * Invoke this from {@link OnBackAnimationCallback#onBackCancelled()}.
+   *
+   * <p>This method should be called when a back gesture is cancelled or the back button is pressed.
+   * It informs the Flutter framework about the cancellation.
+   *
+   * <p>This method enables the Flutter framework to rollback any UI changes or animations initiated
+   * in response to the back gesture. This includes resetting UI elements to their state prior to
+   * the gesture's start.
+   */
+  @TargetApi(API_LEVELS.API_34)
+  @RequiresApi(API_LEVELS.API_34)
+  void cancelBackGesture() {
+    ensureAlive();
+    if (flutterEngine != null) {
+      Log.v(TAG, "Forwarding cancelBackGesture() to FlutterEngine.");
+      flutterEngine.getBackGestureChannel().cancelBackGesture();
+    } else {
+      Log.w(TAG, "Invoked cancelBackGesture() before FlutterFragment was attached to an Activity.");
     }
   }
 
@@ -773,11 +935,13 @@ import java.util.List;
   void onNewIntent(@NonNull Intent intent) {
     ensureAlive();
     if (flutterEngine != null) {
-      Log.v(TAG, "Forwarding onNewIntent() to FlutterEngine and sending pushRoute message.");
+      Log.v(
+          TAG,
+          "Forwarding onNewIntent() to FlutterEngine and sending pushRouteInformation message.");
       flutterEngine.getActivityControlSurface().onNewIntent(intent);
       String initialRoute = maybeGetInitialRouteFromIntent(intent);
       if (initialRoute != null && !initialRoute.isEmpty()) {
-        flutterEngine.getNavigationChannel().pushRoute(initialRoute);
+        flutterEngine.getNavigationChannel().pushRouteInformation(initialRoute);
       }
     } else {
       Log.w(TAG, "onNewIntent() invoked before FlutterFragment was attached to an Activity.");
@@ -829,6 +993,27 @@ import java.util.List;
   }
 
   /**
+   * Invoke this from {@code Activity#onWindowFocusChanged()}.
+   *
+   * <p>A {@code Fragment} host must have its containing {@code Activity} forward this call so that
+   * the {@code Fragment} can then invoke this method.
+   */
+  void onWindowFocusChanged(boolean hasFocus) {
+    ensureAlive();
+    Log.v(TAG, "Received onWindowFocusChanged: " + (hasFocus ? "true" : "false"));
+    if (host.shouldDispatchAppLifecycleState() && flutterEngine != null) {
+      // TODO(gspencergoog): Once we have support for multiple windows/views,
+      // this code will need to consult the list of windows/views to determine if
+      // any windows in the app are focused and call the appropriate function.
+      if (hasFocus) {
+        flutterEngine.getLifecycleChannel().aWindowIsFocused();
+      } else {
+        flutterEngine.getLifecycleChannel().noWindowsAreFocused();
+      }
+    }
+  }
+
+  /**
    * Invoke this from {@link android.app.Activity#onTrimMemory(int)}.
    *
    * <p>A {@code Fragment} host must have its containing {@code Activity} forward this call so that
@@ -850,6 +1035,7 @@ import java.util.List;
         flutterEngine.getSystemChannel().sendMemoryPressureWarning();
       }
       flutterEngine.getRenderer().onTrimMemory(level);
+      flutterEngine.getPlatformViewsController().onTrimMemory(level);
     }
   }
 
@@ -870,8 +1056,7 @@ import java.util.List;
    * FlutterActivityAndFragmentDelegate}.
    */
   /* package */ interface Host
-      extends SplashScreenProvider,
-          FlutterEngineProvider,
+      extends FlutterEngineProvider,
           FlutterEngineConfigurator,
           PlatformPlugin.PlatformPluginDelegate {
     /**
@@ -910,6 +1095,9 @@ import java.util.List;
      */
     @Nullable
     String getCachedEngineId();
+
+    @Nullable
+    String getCachedEngineGroupId();
 
     /**
      * Returns true if the {@link io.flutter.embedding.engine.FlutterEngine} used in this delegate
@@ -984,9 +1172,6 @@ import java.util.List;
      * FlutterActivity} or {@link FlutterFragment} can access it.
      */
     ExclusiveAppComponent<Activity> getExclusiveAppComponent();
-
-    @Nullable
-    SplashScreen provideSplashScreen();
 
     /**
      * Returns the {@link io.flutter.embedding.engine.FlutterEngine} that should be rendered to a
@@ -1107,5 +1292,19 @@ import java.util.List;
      * while return {@code true} means the engine dispatches these events.
      */
     boolean shouldDispatchAppLifecycleState();
+
+    /**
+     * Whether to automatically attach the {@link FlutterView} to the engine.
+     *
+     * <p>In the add-to-app scenario where multiple {@link FlutterView} share the same {@link
+     * FlutterEngine}, the host application desires to determine the timing of attaching the {@link
+     * FlutterView} to the engine, for example, during the {@code onResume} instead of the {@code
+     * onCreateView}.
+     *
+     * <p>Defaults to {@code true}.
+     */
+    boolean attachToEngineAutomatically();
+
+    boolean getBackCallbackState();
   }
 }

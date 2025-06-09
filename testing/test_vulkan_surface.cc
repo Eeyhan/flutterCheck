@@ -11,9 +11,12 @@
 #include "third_party/skia/include/core/SkColorType.h"
 #include "third_party/skia/include/core/SkSurface.h"
 #include "third_party/skia/include/core/SkSurfaceProps.h"
+#include "third_party/skia/include/gpu/ganesh/GrBackendSurface.h"
+#include "third_party/skia/include/gpu/ganesh/SkSurfaceGanesh.h"
+#include "third_party/skia/include/gpu/ganesh/vk/GrVkBackendSurface.h"
+#include "third_party/skia/include/gpu/ganesh/vk/GrVkTypes.h"
 
-namespace flutter {
-namespace testing {
+namespace flutter::testing {
 
 TestVulkanSurface::TestVulkanSurface(TestVulkanImage&& image)
     : image_(std::move(image)){};
@@ -40,16 +43,14 @@ std::unique_ptr<TestVulkanSurface> TestVulkanSurface::Create(
       .fSampleCount = 1,
       .fLevelCount = 1,
   };
-  GrBackendTexture backend_texture(surface_size.width(),   //
-                                   surface_size.height(),  //
-                                   image_info              //
-  );
+  auto backend_texture = GrBackendTextures::MakeVk(
+      surface_size.width(), surface_size.height(), image_info);
 
   SkSurfaceProps surface_properties(0, kUnknown_SkPixelGeometry);
 
   auto result = std::unique_ptr<TestVulkanSurface>(
       new TestVulkanSurface(std::move(image_result.value())));
-  result->surface_ = SkSurface::MakeFromBackendTexture(
+  result->surface_ = SkSurfaces::WrapBackendTexture(
       context.GetGrDirectContext().get(),  // context
       backend_texture,                     // back-end texture
       kTopLeft_GrSurfaceOrigin,            // surface origin
@@ -108,5 +109,4 @@ VkImage TestVulkanSurface::GetImage() {
   return image_.GetImage();
 }
 
-}  // namespace testing
-}  // namespace flutter
+}  // namespace flutter::testing

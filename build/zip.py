@@ -6,26 +6,29 @@
 
 import argparse
 import json
-import zipfile
 import os
 import stat
 import sys
+import zipfile
 
 
 def _zip_dir(path, zip_file, prefix):
   path = path.rstrip('/\\')
-  for root, _, files in os.walk(path):
+  for root, directories, files in os.walk(path):
+    for directory in directories:
+      if os.path.islink(os.path.join(root, directory)):
+        add_symlink(
+            zip_file,
+            os.path.join(root, directory),
+            os.path.join(root.replace(path, prefix), directory),
+        )
     for file in files:
       if os.path.islink(os.path.join(root, file)):
         add_symlink(
-            zip_file, os.path.join(root, file),
-            os.path.join(root.replace(path, prefix), file)
+            zip_file, os.path.join(root, file), os.path.join(root.replace(path, prefix), file)
         )
         continue
-      zip_file.write(
-          os.path.join(root, file),
-          os.path.join(root.replace(path, prefix), file)
-      )
+      zip_file.write(os.path.join(root, file), os.path.join(root.replace(path, prefix), file))
 
 
 def add_symlink(zip_file, source, target):
@@ -43,7 +46,7 @@ def add_symlink(zip_file, source, target):
       | stat.S_IWGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IWOTH | stat.S_IXOTH
   )
   zip_info.external_attr = unix_st_mode << 16
-  zip_file.writestr(zip_info, source)
+  zip_file.writestr(zip_info, os.readlink(source))
 
 
 def main(args):
@@ -73,12 +76,7 @@ def main(args):
 
 if __name__ == '__main__':
   parser = argparse.ArgumentParser(description='This script creates zip files.')
-  parser.add_argument(
-      '-o',
-      dest='output',
-      action='store',
-      help='The name of the output zip file.'
-  )
+  parser.add_argument('-o', dest='output', action='store', help='The name of the output zip file.')
   parser.add_argument(
       '-i',
       dest='input_pairs',
@@ -87,9 +85,6 @@ if __name__ == '__main__':
       help='The input file and its destination location in the zip archive.'
   )
   parser.add_argument(
-      '-f',
-      dest='source_file',
-      action='store',
-      help='The path to the file list to zip.'
+      '-f', dest='source_file', action='store', help='The path to the file list to zip.'
   )
   sys.exit(main(parser.parse_args()))

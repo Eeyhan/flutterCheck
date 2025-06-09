@@ -2,6 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#ifndef FLUTTER_SHELL_PLATFORM_DARWIN_MACOS_FRAMEWORK_SOURCE_FLUTTERTEXTINPUTPLUGIN_H_
+#define FLUTTER_SHELL_PLATFORM_DARWIN_MACOS_FRAMEWORK_SOURCE_FLUTTERTEXTINPUTPLUGIN_H_
+
 #import <Cocoa/Cocoa.h>
 
 #import "flutter/shell/platform/darwin/common/framework/Headers/FlutterBinaryMessenger.h"
@@ -46,15 +49,6 @@
 - (BOOL)isFirstResponder;
 
 /**
- * Whether this plugin has composing text.
- *
- * This is only true when the text input plugin is actively taking user input with composing text.
- */
-// TODO (LongCatIsLooong): remove this method and implement a long-term fix for
-// https://github.com/flutter/flutter/issues/85328.
-- (BOOL)isComposing;
-
-/**
  * Handles key down events received from the view controller, responding YES if
  * the event was handled.
  *
@@ -73,4 +67,8 @@
 - (void)handleMethodCall:(FlutterMethodCall*)call result:(FlutterResult)result;
 - (NSRect)firstRectForCharacterRange:(NSRange)range actualRange:(NSRangePointer)actualRange;
 - (NSDictionary*)editingState;
+@property(nonatomic) NSTextInputContext* textInputContext;
+@property(readwrite, nonatomic) NSString* customRunLoopMode;
 @end
+
+#endif  // FLUTTER_SHELL_PLATFORM_DARWIN_MACOS_FRAMEWORK_SOURCE_FLUTTERTEXTINPUTPLUGIN_H_

@@ -5,6 +5,8 @@
 #ifndef FLUTTER_LIB_UI_PAINTING_IMAGE_DECODER_SKIA_H_
 #define FLUTTER_LIB_UI_PAINTING_IMAGE_DECODER_SKIA_H_
 
+#if !SLIMPELLER
+
 #include "flutter/fml/macros.h"
 #include "flutter/lib/ui/painting/image_decoder.h"
 
@@ -13,7 +15,7 @@ namespace flutter {
 class ImageDecoderSkia final : public ImageDecoder {
  public:
   ImageDecoderSkia(
-      TaskRunners runners,
+      const TaskRunners& runners,
       std::shared_ptr<fml::ConcurrentTaskRunner> concurrent_task_runner,
       fml::WeakPtr<IOManager> io_manager);
 
@@ -36,5 +38,7 @@ class ImageDecoderSkia final : public ImageDecoder {
 };
 
 }  // namespace flutter
+
+#endif  //  !SLIMPELLER
 
 #endif  // FLUTTER_LIB_UI_PAINTING_IMAGE_DECODER_SKIA_H_

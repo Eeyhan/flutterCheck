@@ -34,11 +34,15 @@ class EmbedderTaskRunner final : public fml::TaskRunner {
                        fml::TimePoint target_time)>
         post_task_callback;
     //--------------------------------------------------------------------------
-    /// Asks the embedder if tasks posted to it on this task task runner via the
+    /// Asks the embedder if tasks posted to it on this task runner via the
     /// `post_task_callback` will be executed (after task expiry) on the calling
     /// thread.
     ///
     std::function<bool(void)> runs_task_on_current_thread_callback;
+
+    //--------------------------------------------------------------------------
+    /// Performs user-designated cleanup on destruction.
+    std::function<void()> destruction_callback;
   };
 
   //----------------------------------------------------------------------------

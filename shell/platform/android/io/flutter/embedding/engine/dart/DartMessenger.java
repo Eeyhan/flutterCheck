@@ -269,8 +269,7 @@ class DartMessenger implements BinaryMessenger, PlatformMessageHandler {
       @NonNull String channel,
       @Nullable ByteBuffer message,
       @Nullable BinaryMessenger.BinaryReply callback) {
-    TraceSection.begin("DartMessenger#send on " + channel);
-    try {
+    try (TraceSection e = TraceSection.scoped("DartMessenger#send on " + channel)) {
       Log.v(TAG, "Sending message with callback over channel '" + channel + "'");
       int replyId = nextReplyId++;
       if (callback != null) {
@@ -281,8 +280,6 @@ class DartMessenger implements BinaryMessenger, PlatformMessageHandler {
       } else {
         flutterJNI.dispatchPlatformMessage(channel, message, message.position(), replyId);
       }
-    } finally {
-      TraceSection.end();
     }
   }
 
@@ -311,11 +308,14 @@ class DartMessenger implements BinaryMessenger, PlatformMessageHandler {
       @Nullable ByteBuffer message,
       int replyId,
       long messageData) {
+    // Called from any thread.
     final DartMessengerTaskQueue taskQueue = (handlerInfo != null) ? handlerInfo.taskQueue : null;
+    TraceSection.beginAsyncSection("PlatformChannel ScheduleHandler on " + channel, replyId);
     Runnable myRunnable =
         () -> {
-          TraceSection.begin("DartMessenger#handleMessageFromDart on " + channel);
-          try {
+          TraceSection.endAsyncSection("PlatformChannel ScheduleHandler on " + channel, replyId);
+          try (TraceSection e =
+              TraceSection.scoped("DartMessenger#handleMessageFromDart on " + channel)) {
             invokeHandler(handlerInfo, message, replyId);
             if (message != null && message.isDirect()) {
               // This ensures that if a user retains an instance to the ByteBuffer and it
@@ -325,7 +325,6 @@ class DartMessenger implements BinaryMessenger, PlatformMessageHandler {
           } finally {
             // This is deleting the data underneath the message object.
             flutterJNI.cleanupMessageData(messageData);
-            TraceSection.end();
           }
         };
     final DartMessengerTaskQueue nonnullTaskQueue =
@@ -336,11 +335,13 @@ class DartMessenger implements BinaryMessenger, PlatformMessageHandler {
   @Override
   public void handleMessageFromDart(
       @NonNull String channel, @Nullable ByteBuffer message, int replyId, long messageData) {
-    // Called from the ui thread.
+    // Called from any thread.
     Log.v(TAG, "Received message from Dart over channel '" + channel + "'");
 
     HandlerInfo handlerInfo;
     boolean messageDeferred;
+    // This lock can potentially be a bottleneck and could replaced with a
+    // read/write lock.
     synchronized (handlersLock) {
       handlerInfo = messageHandlers.get(channel);
       messageDeferred = (enableBufferingIncomingMessages.get() && handlerInfo == null);

@@ -59,6 +59,7 @@ static ActionData action_mapping[] = {
     {kFlutterSemanticsActionMoveCursorForwardByWord, "MoveCursorForwardByWord"},
     {kFlutterSemanticsActionMoveCursorBackwardByWord,
      "MoveCursorBackwardByWord"},
+    {kFlutterSemanticsActionFocus, "Focus"},
     {static_cast<FlutterSemanticsAction>(0), nullptr}};
 
 struct FlAccessibleNodePrivate {
@@ -80,7 +81,7 @@ struct FlAccessibleNodePrivate {
   FlutterSemanticsFlag flags;
 };
 
-enum { kProp0, kPropEngine, kPropId, kPropLast };
+enum { PROP_0, PROP_ENGINE, PROP_ID, PROP_LAST };
 
 #define FL_ACCESSIBLE_NODE_GET_PRIVATE(node)                          \
   ((FlAccessibleNodePrivate*)fl_accessible_node_get_instance_private( \
@@ -89,7 +90,6 @@ enum { kProp0, kPropEngine, kPropId, kPropLast };
 static void fl_accessible_node_component_interface_init(
     AtkComponentIface* iface);
 static void fl_accessible_node_action_interface_init(AtkActionIface* iface);
-static void fl_accessible_node_text_interface_init(AtkTextIface* iface);
 
 G_DEFINE_TYPE_WITH_CODE(
     FlAccessibleNode,
@@ -99,9 +99,7 @@ G_DEFINE_TYPE_WITH_CODE(
         G_IMPLEMENT_INTERFACE(ATK_TYPE_COMPONENT,
                               fl_accessible_node_component_interface_init)
             G_IMPLEMENT_INTERFACE(ATK_TYPE_ACTION,
-                                  fl_accessible_node_action_interface_init)
-                G_IMPLEMENT_INTERFACE(ATK_TYPE_TEXT,
-                                      fl_accessible_node_text_interface_init))
+                                  fl_accessible_node_action_interface_init))
 
 // Returns TRUE if [flag] has changed between [old_flags] and [flags].
 static gboolean flag_is_changed(FlutterSemanticsFlag old_flags,
@@ -147,13 +145,13 @@ static void fl_accessible_node_set_property(GObject* object,
                                             GParamSpec* pspec) {
   FlAccessibleNodePrivate* priv = FL_ACCESSIBLE_NODE_GET_PRIVATE(object);
   switch (prop_id) {
-    case kPropEngine:
+    case PROP_ENGINE:
       g_assert(priv->engine == nullptr);
       priv->engine = FL_ENGINE(g_value_get_object(value));
       g_object_add_weak_pointer(object,
                                 reinterpret_cast<gpointer*>(&priv->engine));
       break;
-    case kPropId:
+    case PROP_ID:
       priv->id = g_value_get_int(value);
       break;
     default:
@@ -338,13 +336,6 @@ static const gchar* fl_accessible_node_get_name(AtkAction* action, gint i) {
   return data->name;
 }
 
-// Implements AtkText::get_text.
-static gchar* fl_accessible_node_get_text(AtkText* text,
-                                          gint start_offset,
-                                          gint end_offset) {
-  return nullptr;
-}
-
 // Implements FlAccessibleNode::set_name.
 static void fl_accessible_node_set_name_impl(FlAccessibleNode* self,
                                              const gchar* name) {
@@ -415,6 +406,11 @@ static void fl_accessible_node_set_text_selection_impl(FlAccessibleNode* self,
                                                        gint base,
                                                        gint extent) {}
 
+// Implements FlAccessibleNode::set_text_direction.
+static void fl_accessible_node_set_text_direction_impl(
+    FlAccessibleNode* self,
+    FlutterTextDirection direction) {}
+
 // Implements FlAccessibleNode::perform_action.
 static void fl_accessible_node_perform_action_impl(
     FlAccessibleNode* self,
@@ -446,17 +442,19 @@ static void fl_accessible_node_class_init(FlAccessibleNodeClass* klass) {
       fl_accessible_node_set_value_impl;
   FL_ACCESSIBLE_NODE_CLASS(klass)->set_text_selection =
       fl_accessible_node_set_text_selection_impl;
+  FL_ACCESSIBLE_NODE_CLASS(klass)->set_text_direction =
+      fl_accessible_node_set_text_direction_impl;
   FL_ACCESSIBLE_NODE_CLASS(klass)->perform_action =
       fl_accessible_node_perform_action_impl;
 
   g_object_class_install_property(
-      G_OBJECT_CLASS(klass), kPropEngine,
+      G_OBJECT_CLASS(klass), PROP_ENGINE,
       g_param_spec_object(
           "engine", "engine", "Flutter engine", fl_engine_get_type(),
           static_cast<GParamFlags>(G_PARAM_WRITABLE | G_PARAM_CONSTRUCT_ONLY |
                                    G_PARAM_STATIC_STRINGS)));
   g_object_class_install_property(
-      G_OBJECT_CLASS(klass), kPropId,
+      G_OBJECT_CLASS(klass), PROP_ID,
       g_param_spec_int(
           "id", "id", "Accessibility node ID", 0, G_MAXINT, 0,
           static_cast<GParamFlags>(G_PARAM_WRITABLE | G_PARAM_CONSTRUCT_ONLY |
@@ -473,10 +471,6 @@ static void fl_accessible_node_action_interface_init(AtkActionIface* iface) {
   iface->do_action = fl_accessible_node_do_action;
   iface->get_n_actions = fl_accessible_node_get_n_actions;
   iface->get_name = fl_accessible_node_get_name;
-}
-
-static void fl_accessible_node_text_interface_init(AtkTextIface* iface) {
-  iface->get_text = fl_accessible_node_get_text;
 }
 
 static void fl_accessible_node_init(FlAccessibleNode* self) {
@@ -573,6 +567,14 @@ void fl_accessible_node_set_text_selection(FlAccessibleNode* self,
 
   return FL_ACCESSIBLE_NODE_GET_CLASS(self)->set_text_selection(self, base,
                                                                 extent);
+}
+
+void fl_accessible_node_set_text_direction(FlAccessibleNode* self,
+                                           FlutterTextDirection direction) {
+  g_return_if_fail(FL_IS_ACCESSIBLE_NODE(self));
+
+  return FL_ACCESSIBLE_NODE_GET_CLASS(self)->set_text_direction(self,
+                                                                direction);
 }
 
 void fl_accessible_node_perform_action(FlAccessibleNode* self,

@@ -2,16 +2,23 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#pragma once
+#ifndef FLUTTER_IMPELLER_PLAYGROUND_PLAYGROUND_H_
+#define FLUTTER_IMPELLER_PLAYGROUND_PLAYGROUND_H_
 
+#include <chrono>
 #include <memory>
 
-#include "flutter/fml/closure.h"
-#include "flutter/fml/macros.h"
-#include "gtest/gtest.h"
+#include "flutter/fml/status.h"
+#include "flutter/fml/time/time_delta.h"
+#include "impeller/core/host_buffer.h"
+#include "impeller/core/runtime_types.h"
+#include "impeller/core/texture.h"
 #include "impeller/geometry/point.h"
-#include "impeller/renderer/renderer.h"
-#include "impeller/renderer/texture.h"
+#include "impeller/playground/image/compressed_image.h"
+#include "impeller/playground/image/decompressed_image.h"
+#include "impeller/playground/switches.h"
+#include "impeller/renderer/render_pass.h"
+#include "impeller/runtime_stage/runtime_stage.h"
 
 namespace impeller {
 
@@ -20,25 +27,42 @@ class PlaygroundImpl;
 enum class PlaygroundBackend {
   kMetal,
   kOpenGLES,
+  kVulkan,
 };
+
+constexpr inline RuntimeStageBackend PlaygroundBackendToRuntimeStageBackend(
+    PlaygroundBackend backend) {
+  switch (backend) {
+    case PlaygroundBackend::kMetal:
+      return RuntimeStageBackend::kMetal;
+    case PlaygroundBackend::kOpenGLES:
+      return RuntimeStageBackend::kOpenGLES;
+    case PlaygroundBackend::kVulkan:
+      return RuntimeStageBackend::kVulkan;
+  }
+  FML_UNREACHABLE();
+}
 
 std::string PlaygroundBackendToString(PlaygroundBackend backend);
 
-class Playground : public ::testing::TestWithParam<PlaygroundBackend> {
+class Playground {
  public:
   using SinglePassCallback = std::function<bool(RenderPass& pass)>;
 
-  Playground();
+  explicit Playground(PlaygroundSwitches switches);
 
-  ~Playground();
+  virtual ~Playground();
 
-  static constexpr bool is_enabled() { return is_enabled_; }
+  static bool ShouldOpenNewPlaygrounds();
 
-  void SetUp() override;
+  void SetupContext(PlaygroundBackend backend,
+                    const PlaygroundSwitches& switches);
 
-  void TearDown() override;
+  void SetupWindow();
 
-  PlaygroundBackend GetBackend() const;
+  void TeardownWindow();
+
+  bool IsPlaygroundEnabled() const;
 
   Point GetCursorPosition() const;
 
@@ -46,49 +70,76 @@ class Playground : public ::testing::TestWithParam<PlaygroundBackend> {
 
   Point GetContentScale() const;
 
+  /// @brief Get the amount of time elapsed from the start of the playground's
+  /// execution.
+  Scalar GetSecondsElapsed() const;
+
   std::shared_ptr<Context> GetContext() const;
 
-  bool OpenPlaygroundHere(Renderer::RenderCallback render_callback);
+  std::shared_ptr<Context> MakeContext() const;
+
+  using RenderCallback = std::function<bool(RenderTarget& render_target)>;
+
+  bool OpenPlaygroundHere(const RenderCallback& render_callback);
 
   bool OpenPlaygroundHere(SinglePassCallback pass_callback);
 
-  std::optional<DecompressedImage> LoadFixtureImageRGBA(
-      const char* fixture_name) const;
+  static std::shared_ptr<CompressedImage> LoadFixtureImageCompressed(
+      std::shared_ptr<fml::Mapping> mapping);
+
+  static std::optional<DecompressedImage> DecodeImageRGBA(
+      const std::shared_ptr<CompressedImage>& compressed);
+
+  static std::shared_ptr<Texture> CreateTextureForMapping(
+      const std::shared_ptr<Context>& context,
+      std::shared_ptr<fml::Mapping> mapping,
+      bool enable_mipmapping = false);
 
   std::shared_ptr<Texture> CreateTextureForFixture(
-      const char* fixture_name) const;
+      const char* fixture_name,
+      bool enable_mipmapping = false) const;
 
   std::shared_ptr<Texture> CreateTextureCubeForFixture(
       std::array<const char*, 6> fixture_names) const;
 
- private:
-#if IMPELLER_ENABLE_PLAYGROUND
-  static const bool is_enabled_ = true;
-#else
-  static const bool is_enabled_ = false;
-#endif  // IMPELLER_ENABLE_PLAYGROUND
+  static bool SupportsBackend(PlaygroundBackend backend);
 
-  struct GLFWInitializer;
-  std::unique_ptr<GLFWInitializer> glfw_initializer_;
-  std::unique_ptr<PlaygroundImpl> impl_;
-  std::unique_ptr<Renderer> renderer_;
-  Point cursor_position_;
-  ISize window_size_ = ISize{1024, 768};
+  virtual std::unique_ptr<fml::Mapping> OpenAssetAsMapping(
+      std::string asset_name) const = 0;
 
-  void SetCursorPosition(Point pos);
+  virtual std::string GetWindowTitle() const = 0;
+
+  [[nodiscard]] fml::Status SetCapabilities(
+      const std::shared_ptr<Capabilities>& capabilities);
+
+  /// Returns true if `OpenPlaygroundHere` will actually render anything.
+  bool WillRenderSomething() const;
+
+  using GLProcAddressResolver = std::function<void*(const char* proc_name)>;
+  GLProcAddressResolver CreateGLProcAddressResolver() const;
+
+ protected:
+  const PlaygroundSwitches switches_;
+
+  virtual bool ShouldKeepRendering() const;
 
   void SetWindowSize(ISize size);
 
-  FML_DISALLOW_COPY_AND_ASSIGN(Playground);
+ private:
+  fml::TimeDelta start_time_;
+  std::unique_ptr<PlaygroundImpl> impl_;
+  std::shared_ptr<Context> context_;
+  Point cursor_position_;
+  ISize window_size_ = ISize{1024, 768};
+  std::shared_ptr<HostBuffer> host_buffer_;
+
+  void SetCursorPosition(Point pos);
+
+  Playground(const Playground&) = delete;
+
+  Playground& operator=(const Playground&) = delete;
 };
 
-#define INSTANTIATE_PLAYGROUND_SUITE(playground)                        \
-  INSTANTIATE_TEST_SUITE_P(                                             \
-      Play, playground,                                                 \
-      ::testing::Values(PlaygroundBackend::kMetal,                      \
-                        PlaygroundBackend::kOpenGLES),                  \
-      [](const ::testing::TestParamInfo<Playground::ParamType>& info) { \
-        return PlaygroundBackendToString(info.param);                   \
-      });
-
 }  // namespace impeller
+
+#endif  // FLUTTER_IMPELLER_PLAYGROUND_PLAYGROUND_H_

@@ -3,12 +3,12 @@
 // found in the LICENSE file.
 
 import 'package:ui/ui.dart' as ui;
+import 'package:ui/ui_web/src/ui_web.dart' as ui_web;
 
-import '../browser_detection.dart';
 import '../dom.dart';
-import '../embedder.dart';
 import 'bitmap_canvas.dart';
 import 'color_filter.dart';
+import 'resource_manager.dart';
 import 'shaders/shader.dart';
 import 'surface.dart';
 
@@ -26,12 +26,12 @@ import 'surface.dart';
 class PersistedShaderMask extends PersistedContainerSurface
     implements ui.ShaderMaskEngineLayer {
   PersistedShaderMask(
-    PersistedShaderMask? oldLayer,
+    PersistedShaderMask? super.oldLayer,
     this.shader,
     this.maskRect,
     this.blendMode,
     this.filterQuality,
-  ) : super(oldLayer);
+  );
 
   DomElement? _childContainer;
   final ui.Shader shader;
@@ -39,7 +39,7 @@ class PersistedShaderMask extends PersistedContainerSurface
   final ui.BlendMode blendMode;
   final ui.FilterQuality filterQuality;
   DomElement? _shaderElement;
-  final bool isWebKit = browserEngine == BrowserEngine.webkit;
+  final bool isWebKit = ui_web.browser.browserEngine == ui_web.BrowserEngine.webkit;
 
   @override
   void adoptElements(PersistedShaderMask oldSurface) {
@@ -56,7 +56,8 @@ class PersistedShaderMask extends PersistedContainerSurface
   @override
   void discard() {
     super.discard();
-    flutterViewEmbedder.removeResource(_shaderElement);
+    ResourceManager.instance.removeResource(_shaderElement);
+    _shaderElement = null;
     // Do not detach the child container from the root. It is permanently
     // attached. The elements are reused together and are detached from the DOM
     // together.
@@ -82,7 +83,7 @@ class PersistedShaderMask extends PersistedContainerSurface
 
   @override
   void apply() {
-    flutterViewEmbedder.removeResource(_shaderElement);
+    ResourceManager.instance.removeResource(_shaderElement);
     _shaderElement = null;
     if (shader is ui.Gradient) {
       rootElement!.style
@@ -131,7 +132,6 @@ class PersistedShaderMask extends PersistedContainerSurface
           // Since we don't have a size, we can't use background color.
           // Use svg filter srcIn instead.
           blendModeTemp = ui.BlendMode.srcIn;
-          break;
         case ui.BlendMode.src:
         case ui.BlendMode.dstOver:
         case ui.BlendMode.srcIn:
@@ -166,7 +166,7 @@ class PersistedShaderMask extends PersistedContainerSurface
       } else {
         rootElement!.style.filter = 'url(#${svgFilter.id})';
       }
-      flutterViewEmbedder.addResource(_shaderElement!);
+      ResourceManager.instance.addResource(_shaderElement!);
     }
   }
 
@@ -187,25 +187,19 @@ SvgFilter svgMaskFilterFromImageAndBlendMode(
   switch (blendMode) {
     case ui.BlendMode.src:
       svgFilter = _srcImageToSvg(imageUrl, width, height);
-      break;
     case ui.BlendMode.srcIn:
     case ui.BlendMode.srcATop:
       svgFilter = _srcInImageToSvg(imageUrl, width, height);
-      break;
     case ui.BlendMode.srcOut:
       svgFilter = _srcOutImageToSvg(imageUrl, width, height);
-      break;
     case ui.BlendMode.xor:
       svgFilter = _xorImageToSvg(imageUrl, width, height);
-      break;
     case ui.BlendMode.plus:
       // Porter duff source + destination.
       svgFilter = _compositeImageToSvg(imageUrl, 0, 1, 1, 0, width, height);
-      break;
     case ui.BlendMode.modulate:
       // Porter duff source * destination but preserves alpha.
       svgFilter = _modulateImageToSvg(imageUrl, width, height);
-      break;
     case ui.BlendMode.overlay:
       // Since overlay is the same as hard-light by swapping layers,
       // pass hard-light blend function.
@@ -216,7 +210,6 @@ SvgFilter svgMaskFilterFromImageAndBlendMode(
         height,
         swapLayers: true,
       );
-      break;
     // Several of the filters below (although supported) do not render the
     // same (close but not exact) as native flutter when used as blend mode
     // for a background-image with a background color. They only look
@@ -244,7 +237,6 @@ SvgFilter svgMaskFilterFromImageAndBlendMode(
     case ui.BlendMode.exclusion:
       svgFilter = _blendImageToSvg(
           imageUrl, blendModeToSvgEnum(blendMode)!, width, height);
-      break;
     case ui.BlendMode.dst:
     case ui.BlendMode.dstATop:
     case ui.BlendMode.dstIn:

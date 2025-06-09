@@ -13,7 +13,13 @@ CompilerBackend::CompilerBackend(MSLCompiler compiler)
     : CompilerBackend(Type::kMSL, compiler) {}
 
 CompilerBackend::CompilerBackend(GLSLCompiler compiler)
-    : CompilerBackend(Type::kGLSL, compiler) {}
+    : CompilerBackend(compiler->get_common_options().vulkan_semantics
+                          ? Type::kGLSLVulkan
+                          : Type::kGLSL,
+                      compiler) {}
+
+CompilerBackend::CompilerBackend(SkSLCompiler compiler)
+    : CompilerBackend(Type::kSkSL, compiler) {}
 
 CompilerBackend::CompilerBackend() = default;
 
@@ -39,7 +45,7 @@ uint32_t CompilerBackend::GetExtendedMSLResourceBinding(
     }
   }
   if (auto compiler = GetGLSLCompiler()) {
-    return compiler->get_decoration(id, spv::Decoration::DecorationLocation);
+    return compiler->get_decoration(id, spv::Decoration::DecorationBinding);
   }
   const auto kOOBIndex = static_cast<uint32_t>(-1);
   return kOOBIndex;
@@ -54,6 +60,10 @@ const spirv_cross::Compiler* CompilerBackend::GetCompiler() const {
     return compiler;
   }
 
+  if (auto compiler = GetSkSLCompiler()) {
+    return compiler;
+  }
+
   return nullptr;
 }
 
@@ -63,6 +73,9 @@ spirv_cross::Compiler* CompilerBackend::GetCompiler() {
   }
   if (auto* glsl = std::get_if<GLSLCompiler>(&compiler_)) {
     return glsl->get();
+  }
+  if (auto* sksl = std::get_if<SkSLCompiler>(&compiler_)) {
+    return sksl->get();
   }
   return nullptr;
 }
@@ -77,6 +90,13 @@ const spirv_cross::CompilerMSL* CompilerBackend::GetMSLCompiler() const {
 const spirv_cross::CompilerGLSL* CompilerBackend::GetGLSLCompiler() const {
   if (auto* glsl = std::get_if<GLSLCompiler>(&compiler_)) {
     return glsl->get();
+  }
+  return nullptr;
+}
+
+const CompilerSkSL* CompilerBackend::GetSkSLCompiler() const {
+  if (auto* sksl = std::get_if<SkSLCompiler>(&compiler_)) {
+    return sksl->get();
   }
   return nullptr;
 }

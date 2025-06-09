@@ -2,9 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#pragma once
+#ifndef FLUTTER_IMPELLER_RENDERER_BACKEND_GLES_COMMAND_BUFFER_GLES_H_
+#define FLUTTER_IMPELLER_RENDERER_BACKEND_GLES_COMMAND_BUFFER_GLES_H_
 
-#include "flutter/fml/macros.h"
 #include "impeller/renderer/backend/gles/reactor_gles.h"
 #include "impeller/renderer/command_buffer.h"
 #include "impeller/renderer/render_target.h"
@@ -19,25 +19,41 @@ class CommandBufferGLES final : public CommandBuffer {
  private:
   friend class ContextGLES;
 
-  ReactorGLES::Ref reactor_;
+  std::shared_ptr<ReactorGLES> reactor_;
   bool is_valid_ = false;
 
-  CommandBufferGLES(ReactorGLES::Ref reactor);
+  CommandBufferGLES(std::weak_ptr<const Context> context,
+                    std::shared_ptr<ReactorGLES> reactor);
 
   // |CommandBuffer|
-  void SetLabel(const std::string& label) const override;
+  void SetLabel(std::string_view label) const override;
 
   // |CommandBuffer|
   bool IsValid() const override;
 
   // |CommandBuffer|
-  bool SubmitCommands(CompletionCallback callback) override;
+  bool OnSubmitCommands(CompletionCallback callback) override;
 
   // |CommandBuffer|
-  std::shared_ptr<RenderPass> OnCreateRenderPass(
-      RenderTarget target) const override;
+  void OnWaitUntilCompleted() override;
 
-  FML_DISALLOW_COPY_AND_ASSIGN(CommandBufferGLES);
+  // |CommandBuffer|
+  void OnWaitUntilScheduled() override;
+
+  // |CommandBuffer|
+  std::shared_ptr<RenderPass> OnCreateRenderPass(RenderTarget target) override;
+
+  // |CommandBuffer|
+  std::shared_ptr<BlitPass> OnCreateBlitPass() override;
+
+  // |CommandBuffer|
+  std::shared_ptr<ComputePass> OnCreateComputePass() override;
+
+  CommandBufferGLES(const CommandBufferGLES&) = delete;
+
+  CommandBufferGLES& operator=(const CommandBufferGLES&) = delete;
 };
 
 }  // namespace impeller
+
+#endif  // FLUTTER_IMPELLER_RENDERER_BACKEND_GLES_COMMAND_BUFFER_GLES_H_

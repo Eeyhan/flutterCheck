@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-
-// @dart = 2.12
 part of dart.ui;
 
 /// How the pointer has changed since the last report.
@@ -129,14 +127,24 @@ enum PointerSignalKind {
   /// A pointer-generated scroll (e.g., mouse wheel or trackpad scroll).
   scroll,
 
+  /// A pointer-generated scroll-inertia cancel.
+  scrollInertiaCancel,
+
+  /// A pointer-generated scale event (e.g. trackpad pinch).
+  scale,
+
   /// An unknown pointer signal kind.
   unknown
 }
+
+/// A function that implements the [PointerData.respond] method.
+typedef PointerDataRespondCallback = void Function({bool allowPlatformDefault});
 
 /// Information about the state of a pointer.
 class PointerData {
   /// Creates an object that represents the state of a pointer.
   const PointerData({
+    this.viewId = 0,
     this.embedderId = 0,
     this.timeStamp = Duration.zero,
     this.change = PointerChange.cancel,
@@ -172,13 +180,19 @@ class PointerData {
     this.panDeltaY = 0.0,
     this.scale = 0.0,
     this.rotation = 0.0,
-  });
+    PointerDataRespondCallback? onRespond,
+  }) : _onRespond = onRespond;
 
-  /// Unique identifier that ties the [PointerEvent] to embedder event created it.
+  /// The ID of the [FlutterView] this [PointerEvent] originated from.
+  final int viewId;
+
+  /// Unique identifier that ties the [PointerEvent] to the embedder
+  /// event that created it.
+  /// it.
   ///
-  /// No two pointer events can have the same [embedderId]. This is different from
-  /// [pointerIdentifier] - used for hit-testing, whereas [embedderId] is used to
-  /// identify the platform event.
+  /// No two pointer events can have the same [embedderId]. This is different
+  /// from [pointerIdentifier] - used for hit-testing, whereas [embedderId] is
+  /// used to identify the platform event.
   final int embedderId;
 
   /// Time of event dispatch, relative to an arbitrary timeline.
@@ -370,8 +384,38 @@ class PointerData {
   /// The current angle of the pan/zoom in radians, with 0.0 as the initial angle.
   final double rotation;
 
+  // An optional function that allows the framework to respond to the event
+  // that triggered this PointerData instance.
+  final PointerDataRespondCallback? _onRespond;
+
+  /// Method that the framework/app can call to respond to the native event
+  /// that triggered this [PointerData].
+  ///
+  /// The parameter [allowPlatformDefault] allows the platform to perform the
+  /// default action associated with the native event when it's set to `true`.
+  ///
+  /// This method can be called any number of times, but once `allowPlatformDefault`
+  /// is set to `true`, it can't be set to `false` again.
+  ///
+  /// If `allowPlatformDefault` is never set to `true`, the Flutter engine will
+  /// consume the event, so it won't be seen by the platform. In the web, this
+  /// means that `preventDefault` will be called in the DOM event that triggered
+  /// the `PointerData`. See [Event: preventDefault() method in MDN][EpDmiMDN].
+  ///
+  /// The implementation of this method is configured through the `onRespond`
+  /// parameter of the [PointerData] constructor.
+  ///
+  /// See also [PointerDataRespondCallback].
+  ///
+  /// [EpDmiMDN]: https://developer.mozilla.org/en-US/docs/Web/API/Event/preventDefault
+  void respond({required bool allowPlatformDefault}) {
+    if (_onRespond != null) {
+      _onRespond(allowPlatformDefault: allowPlatformDefault);
+    }
+  }
+
   @override
-  String toString() => 'PointerData(x: $physicalX, y: $physicalY)';
+  String toString() => 'PointerData(viewId: $viewId, x: $physicalX, y: $physicalY)';
 
   /// Returns a complete textual description of the information in this object.
   String toStringFull() {
@@ -409,7 +453,8 @@ class PointerData {
              'panDeltaX: $panDeltaX, '
              'panDeltaY: $panDeltaY, '
              'scale: $scale, '
-             'rotation: $rotation'
+             'rotation: $rotation, '
+             'viewId: $viewId'
            ')';
   }
 }
@@ -417,7 +462,7 @@ class PointerData {
 /// A sequence of reports about the state of pointers.
 class PointerDataPacket {
   /// Creates a packet of pointer data reports.
-  const PointerDataPacket({ this.data = const <PointerData>[] }) : assert(data != null);
+  const PointerDataPacket({ this.data = const <PointerData>[] });
 
   /// Data about the individual pointers in this packet.
   ///

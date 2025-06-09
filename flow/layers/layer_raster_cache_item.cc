@@ -2,10 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#if !SLIMPELLER
+
 #include "flutter/flow/layers/layer_raster_cache_item.h"
 #include "flutter/flow/layers/container_layer.h"
 #include "flutter/flow/raster_cache_item.h"
 #include "flutter/flow/raster_cache_util.h"
+#include "third_party/skia/include/core/SkColorSpace.h"
 
 namespace flutter {
 
@@ -21,12 +24,12 @@ LayerRasterCacheItem::LayerRasterCacheItem(Layer* layer,
       can_cache_children_(can_cache_children) {}
 
 void LayerRasterCacheItem::PrerollSetup(PrerollContext* context,
-                                        const SkMatrix& matrix) {
+                                        const DlMatrix& matrix) {
   cache_state_ = CacheState::kNone;
   if (context->raster_cache && context->raster_cached_entries) {
     context->raster_cached_entries->push_back(this);
     child_items_ = context->raster_cached_entries->size();
-    matrix_ = matrix;
+    set_matrix(matrix);
   }
 }
 
@@ -39,7 +42,7 @@ std::unique_ptr<LayerRasterCacheItem> LayerRasterCacheItem::Make(
 }
 
 void LayerRasterCacheItem::PrerollFinalize(PrerollContext* context,
-                                           const SkMatrix& matrix) {
+                                           const DlMatrix& matrix) {
   if (!context->raster_cache || !context->raster_cached_entries) {
     return;
   }
@@ -47,7 +50,7 @@ void LayerRasterCacheItem::PrerollFinalize(PrerollContext* context,
   // alive, but if the following conditions apply then we need to set our
   // state back to kDoNotCache so that we don't populate the entry later.
   if (context->has_platform_view || context->has_texture_layer ||
-      !SkRect::Intersects(context->cull_rect, layer_->paint_bounds())) {
+      context->state_stack.content_culled(layer_->paint_bounds())) {
     return;
   }
   child_items_ = context->raster_cached_entries->size() - child_items_;
@@ -88,10 +91,10 @@ std::optional<RasterCacheKeyID> LayerRasterCacheItem::GetId() const {
 const SkRect* LayerRasterCacheItem::GetPaintBoundsFromLayer() const {
   switch (cache_state_) {
     case CacheState::kCurrent:
-      return &(layer_->paint_bounds());
+      return &ToSkRect(layer_->paint_bounds());
     case CacheState::kChildren:
       FML_DCHECK(layer_->as_container_layer());
-      return &(layer_->as_container_layer()->child_paint_bounds());
+      return &ToSkRect(layer_->as_container_layer()->child_paint_bounds());
     default:
       FML_DCHECK(cache_state_ != CacheState::kNone);
       return nullptr;
@@ -101,25 +104,21 @@ const SkRect* LayerRasterCacheItem::GetPaintBoundsFromLayer() const {
 bool Rasterize(RasterCacheItem::CacheState cache_state,
                Layer* layer,
                const PaintContext& paint_context,
-               SkCanvas* canvas) {
+               DlCanvas* canvas) {
   FML_DCHECK(cache_state != RasterCacheItem::CacheState::kNone);
-  SkISize canvas_size = canvas->getBaseLayerSize();
-  SkNWayCanvas internal_nodes_canvas(canvas_size.width(), canvas_size.height());
-  internal_nodes_canvas.setMatrix(canvas->getTotalMatrix());
-  internal_nodes_canvas.addCanvas(canvas);
+  LayerStateStack state_stack;
+  state_stack.set_delegate(canvas);
   PaintContext context = {
       // clang-format off
-          .internal_nodes_canvas         = static_cast<SkCanvas*>(&internal_nodes_canvas),
-          .leaf_nodes_canvas             = canvas,
-          .gr_context                    = paint_context.gr_context,
-          .dst_color_space               = paint_context.dst_color_space,
-          .view_embedder                 = paint_context.view_embedder,
-          .raster_time                   = paint_context.raster_time,
-          .ui_time                       = paint_context.ui_time,
-          .texture_registry              = paint_context.texture_registry,
-          .raster_cache                  = paint_context.raster_cache,
-          .checkerboard_offscreen_layers = paint_context.checkerboard_offscreen_layers,
-          .frame_device_pixel_ratio      = paint_context.frame_device_pixel_ratio,
+      .state_stack                   = state_stack,
+      .canvas                        = canvas,
+      .gr_context                    = paint_context.gr_context,
+      .dst_color_space               = paint_context.dst_color_space,
+      .view_embedder                 = paint_context.view_embedder,
+      .raster_time                   = paint_context.raster_time,
+      .ui_time                       = paint_context.ui_time,
+      .texture_registry              = paint_context.texture_registry,
+      .raster_cache                  = paint_context.raster_cache,
       // clang-format on
   };
 
@@ -142,25 +141,26 @@ static const auto* flow_type = "RasterCacheFlow::Layer";
 
 bool LayerRasterCacheItem::TryToPrepareRasterCache(const PaintContext& context,
                                                    bool parent_cached) const {
-  if (!context.raster_cache || parent_cached) {
+  auto maybe_id = GetId();
+  if (!maybe_id.has_value() || !context.raster_cache || parent_cached) {
     return false;
   }
   if (cache_state_ != kNone) {
     if (const SkRect* paint_bounds = GetPaintBoundsFromLayer()) {
       RasterCache::Context r_context = {
           // clang-format off
-      .gr_context         = context.gr_context,
-      .dst_color_space    = context.dst_color_space,
-      .matrix             = matrix_,
-      .logical_rect       = *paint_bounds,
-      .flow_type          = flow_type,
-      .checkerboard       = context.checkerboard_offscreen_layers,
+          .gr_context         = context.gr_context,
+          .dst_color_space    = context.dst_color_space,
+          .matrix             = matrix_,
+          .logical_rect       = *paint_bounds,
+          .flow_type          = flow_type,
           // clang-format on
       };
+      auto id = maybe_id.value();
       return context.raster_cache->UpdateCacheEntry(
-          GetId().value(), r_context,
+          id, r_context,
           [ctx = context, cache_state = cache_state_,
-           layer = layer_](SkCanvas* canvas) {
+           layer = layer_](DlCanvas* canvas) {
             Rasterize(cache_state, layer, ctx, canvas);
           });
     }
@@ -169,13 +169,13 @@ bool LayerRasterCacheItem::TryToPrepareRasterCache(const PaintContext& context,
 }
 
 bool LayerRasterCacheItem::Draw(const PaintContext& context,
-                                const SkPaint* paint) const {
-  return Draw(context, context.leaf_nodes_canvas, paint);
+                                const DlPaint* paint) const {
+  return Draw(context, context.canvas, paint);
 }
 
 bool LayerRasterCacheItem::Draw(const PaintContext& context,
-                                SkCanvas* canvas,
-                                const SkPaint* paint) const {
+                                DlCanvas* canvas,
+                                const DlPaint* paint) const {
   if (!context.raster_cache || !canvas) {
     return false;
   }
@@ -183,13 +183,20 @@ bool LayerRasterCacheItem::Draw(const PaintContext& context,
     case RasterCacheItem::kNone:
       return false;
     case RasterCacheItem::kCurrent: {
-      return context.raster_cache->Draw(key_id_, *canvas, paint);
+      return context.raster_cache->Draw(key_id_, *canvas, paint,
+                                        context.rendering_above_platform_view);
     }
     case RasterCacheItem::kChildren: {
+      if (!layer_children_id_.has_value()) {
+        return false;
+      }
       return context.raster_cache->Draw(layer_children_id_.value(), *canvas,
-                                        paint);
+                                        paint,
+                                        context.rendering_above_platform_view);
     }
   }
 }
 
 }  // namespace flutter
+
+#endif  //  !SLIMPELLER

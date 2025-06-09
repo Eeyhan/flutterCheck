@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#if !SLIMPELLER
+
 #include "flutter/lib/ui/painting/image_decoder_skia.h"
 
 #include <algorithm>
@@ -9,20 +11,23 @@
 #include "flutter/fml/logging.h"
 #include "flutter/fml/make_copyable.h"
 #include "flutter/lib/ui/painting/display_list_image_gpu.h"
+#include "third_party/skia/include/core/SkBitmap.h"
+#include "third_party/skia/include/core/SkImage.h"
+#include "third_party/skia/include/gpu/ganesh/SkImageGanesh.h"
 
 namespace flutter {
 
 ImageDecoderSkia::ImageDecoderSkia(
-    TaskRunners runners,
+    const TaskRunners& runners,
     std::shared_ptr<fml::ConcurrentTaskRunner> concurrent_task_runner,
     fml::WeakPtr<IOManager> io_manager)
-    : ImageDecoder(std::move(runners),
+    : ImageDecoder(runners,
                    std::move(concurrent_task_runner),
                    std::move(io_manager)) {}
 
 ImageDecoderSkia::~ImageDecoderSkia() = default;
 
-static sk_sp<SkImage> ResizeRasterImage(sk_sp<SkImage> image,
+static sk_sp<SkImage> ResizeRasterImage(const sk_sp<SkImage>& image,
                                         const SkISize& resized_dimensions,
                                         const fml::tracing::TraceFlow& flow) {
   FML_DCHECK(!image->isTextureBacked());
@@ -61,7 +66,7 @@ static sk_sp<SkImage> ResizeRasterImage(sk_sp<SkImage> image,
   // instead of copying.
   scaled_bitmap.setImmutable();
 
-  auto scaled_image = SkImage::MakeFromBitmap(scaled_bitmap);
+  auto scaled_image = SkImages::RasterFromBitmap(scaled_bitmap);
   if (!scaled_image) {
     FML_LOG(ERROR) << "Could not create a scaled image from a scaled bitmap.";
     return nullptr;
@@ -77,7 +82,7 @@ static sk_sp<SkImage> ImageFromDecompressedData(
     const fml::tracing::TraceFlow& flow) {
   TRACE_EVENT0("flutter", __FUNCTION__);
   flow.Step(__FUNCTION__);
-  auto image = SkImage::MakeRasterData(
+  auto image = SkImages::RasterFromData(
       descriptor->image_info(), descriptor->data(), descriptor->row_bytes());
 
   if (!image) {
@@ -90,8 +95,8 @@ static sk_sp<SkImage> ImageFromDecompressedData(
     return image->makeRasterImage();
   }
 
-  return ResizeRasterImage(std::move(image),
-                           SkISize::Make(target_width, target_height), flow);
+  return ResizeRasterImage(image, SkISize::Make(target_width, target_height),
+                           flow);
 }
 
 sk_sp<SkImage> ImageDecoderSkia::ImageFromCompressedData(
@@ -113,9 +118,9 @@ sk_sp<SkImage> ImageDecoderSkia::ImageFromCompressedData(
                                       static_cast<int32_t>(target_height)};
 
   auto decode_dimensions = descriptor->get_scaled_dimensions(
-      std::max(static_cast<double>(resized_dimensions.width()) /
+      std::max(static_cast<float>(resized_dimensions.width()) /
                    source_dimensions.width(),
-               static_cast<double>(resized_dimensions.height()) /
+               static_cast<float>(resized_dimensions.height()) /
                    source_dimensions.height()));
 
   // If the codec supports efficient sub-pixel decoding, decoded at a resolution
@@ -137,15 +142,14 @@ sk_sp<SkImage> ImageDecoderSkia::ImageFromCompressedData(
       // the pixels instead of copying.
       scaled_bitmap.setImmutable();
 
-      auto decoded_image = SkImage::MakeFromBitmap(scaled_bitmap);
+      auto decoded_image = SkImages::RasterFromBitmap(scaled_bitmap);
       FML_DCHECK(decoded_image);
       if (!decoded_image) {
         FML_LOG(ERROR)
             << "Could not create a scaled image from a scaled bitmap.";
         return nullptr;
       }
-      return ResizeRasterImage(std::move(decoded_image), resized_dimensions,
-                               flow);
+      return ResizeRasterImage(decoded_image, resized_dimensions, flow);
     }
   }
 
@@ -154,12 +158,12 @@ sk_sp<SkImage> ImageDecoderSkia::ImageFromCompressedData(
     return nullptr;
   }
 
-  return ResizeRasterImage(std::move(image), resized_dimensions, flow);
+  return ResizeRasterImage(image, resized_dimensions, flow);
 }
 
 static SkiaGPUObject<SkImage> UploadRasterImage(
     sk_sp<SkImage> image,
-    fml::WeakPtr<IOManager> io_manager,
+    const fml::WeakPtr<IOManager>& io_manager,
     const fml::tracing::TraceFlow& flow) {
   TRACE_EVENT0("flutter", __FUNCTION__);
   flow.Step(__FUNCTION__);
@@ -185,9 +189,9 @@ static SkiaGPUObject<SkImage> UploadRasterImage(
       fml::SyncSwitch::Handlers()
           .SetIfTrue([&result, &pixmap, &image] {
             SkSafeRef(image.get());
-            sk_sp<SkImage> texture_image = SkImage::MakeFromRaster(
+            sk_sp<SkImage> texture_image = SkImages::RasterFromPixmap(
                 pixmap,
-                [](const void* pixels, SkImage::ReleaseContext context) {
+                [](const void* pixels, SkImages::ReleaseContext context) {
                   SkSafeUnref(static_cast<SkImage*>(context));
                 },
                 image.get());
@@ -196,12 +200,13 @@ static SkiaGPUObject<SkImage> UploadRasterImage(
           .SetIfFalse([&result, context = io_manager->GetResourceContext(),
                        &pixmap, queue = io_manager->GetSkiaUnrefQueue()] {
             TRACE_EVENT0("flutter", "MakeCrossContextImageFromPixmap");
-            sk_sp<SkImage> texture_image = SkImage::MakeCrossContextFromPixmap(
-                context.get(),  // context
-                pixmap,         // pixmap
-                true,           // buildMips,
-                true            // limitToMaxTextureSize
-            );
+            sk_sp<SkImage> texture_image =
+                SkImages::CrossContextTextureFromPixmap(
+                    context.get(),  // context
+                    pixmap,         // pixmap
+                    true,           // buildMips,
+                    true            // limitToMaxTextureSize
+                );
             if (!texture_image) {
               FML_LOG(ERROR) << "Could not make x-context image.";
               result = {};
@@ -251,7 +256,7 @@ void ImageDecoderSkia::Decode(fml::RefPtr<ImageDescriptor> descriptor_ref_ptr,
               // terminate without a base trace. Add one explicitly.
               TRACE_EVENT0("flutter", "ImageDecodeCallback");
               flow.End();
-              callback(DlImageGPU::Make(std::move(image)));
+              callback(DlImageGPU::Make(std::move(image)), {});
               raw_descriptor->Release();
             }));
       };
@@ -326,3 +331,5 @@ void ImageDecoderSkia::Decode(fml::RefPtr<ImageDescriptor> descriptor_ref_ptr,
 }
 
 }  // namespace flutter
+
+#endif  //  !SLIMPELLER

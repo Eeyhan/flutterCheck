@@ -9,11 +9,15 @@
 
 namespace flutter {
 
+// The unique identifier for a view.
+typedef int64_t FlutterViewId;
+
 // A view displaying Flutter content.
 class FlutterView {
  public:
   explicit FlutterView(FlutterDesktopViewRef view) : view_(view) {}
 
+  // Destroys this reference to the view. The underlying view is not destroyed.
   virtual ~FlutterView() = default;
 
   // Prevent copying.
@@ -22,6 +26,11 @@ class FlutterView {
 
   // Returns the backing HWND for the view.
   HWND GetNativeWindow() { return FlutterDesktopViewGetHWND(view_); }
+
+  // Returns the DXGI adapter used for rendering or nullptr in case of error.
+  IDXGIAdapter* GetGraphicsAdapter() {
+    return FlutterDesktopViewGetGraphicsAdapter(view_);
+  }
 
  private:
   // Handle for interacting with the C API's view.

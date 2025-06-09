@@ -8,7 +8,10 @@
 
 #include "impeller/base/allocation.h"
 #include "impeller/base/comparable.h"
+#include "impeller/base/strings.h"
 #include "impeller/base/validation.h"
+#include "impeller/renderer/backend/gles/capabilities_gles.h"
+#include "impeller/renderer/capabilities.h"
 
 namespace impeller {
 
@@ -32,7 +35,22 @@ const char* GLErrorToString(GLenum value) {
   return "Unknown.";
 }
 
-ProcTableGLES::Resolver WrappedResolver(ProcTableGLES::Resolver resolver) {
+bool GLErrorIsFatal(GLenum value) {
+  switch (value) {
+    case GL_NO_ERROR:
+      return false;
+    case GL_INVALID_ENUM:
+    case GL_INVALID_VALUE:
+    case GL_INVALID_OPERATION:
+    case GL_INVALID_FRAMEBUFFER_OPERATION:
+    case GL_OUT_OF_MEMORY:
+      return true;
+  }
+  return false;
+}
+
+ProcTableGLES::Resolver WrappedResolver(
+    const ProcTableGLES::Resolver& resolver) {
   return [resolver](const char* function_name) -> void* {
     auto resolved = resolver(function_name);
     if (resolved) {
@@ -53,7 +71,11 @@ ProcTableGLES::Resolver WrappedResolver(ProcTableGLES::Resolver resolver) {
   };
 }
 
-ProcTableGLES::ProcTableGLES(Resolver resolver) {
+ProcTableGLES::ProcTableGLES(  // NOLINT(google-readability-function-size)
+    Resolver resolver) {
+  // The reason this constructor has anywhere near enough code to tip off
+  // `google-readability-function-size` is the proc macros, so ignore the lint.
+
   if (!resolver) {
     return;
   }
@@ -62,8 +84,7 @@ ProcTableGLES::ProcTableGLES(Resolver resolver) {
 
   auto error_fn = reinterpret_cast<PFNGLGETERRORPROC>(resolver("glGetError"));
   if (!error_fn) {
-    VALIDATION_LOG << "Could not resolve "
-                   << "glGetError";
+    VALIDATION_LOG << "Could not resolve " << "glGetError";
     return;
   }
 
@@ -79,6 +100,18 @@ ProcTableGLES::ProcTableGLES(Resolver resolver) {
 
   FOR_EACH_IMPELLER_PROC(IMPELLER_PROC);
 
+  description_ = std::make_unique<DescriptionGLES>(*this);
+
+  if (!description_->IsValid()) {
+    return;
+  }
+
+  if (description_->IsES()) {
+    FOR_EACH_IMPELLER_ES_ONLY_PROC(IMPELLER_PROC);
+  } else {
+    FOR_EACH_IMPELLER_DESKTOP_ONLY_PROC(IMPELLER_PROC);
+  }
+
 #undef IMPELLER_PROC
 
 #define IMPELLER_PROC(proc_ivar)                                \
@@ -87,15 +120,14 @@ ProcTableGLES::ProcTableGLES(Resolver resolver) {
         reinterpret_cast<decltype(proc_ivar.function)>(fn_ptr); \
     proc_ivar.error_fn = error_fn;                              \
   }
+
+  if (description_->GetGlVersion().IsAtLeast(Version(3))) {
+    FOR_EACH_IMPELLER_GLES3_PROC(IMPELLER_PROC);
+  }
+
   FOR_EACH_IMPELLER_EXT_PROC(IMPELLER_PROC);
 
 #undef IMPELLER_PROC
-
-  description_ = std::make_unique<DescriptionGLES>(*this);
-
-  if (!description_->IsValid()) {
-    return;
-  }
 
   if (!description_->HasDebugExtension()) {
     PushDebugGroupKHR.Reset();
@@ -109,7 +141,7 @@ ProcTableGLES::ProcTableGLES(Resolver resolver) {
     DiscardFramebufferEXT.Reset();
   }
 
-  capabilities_ = std::make_unique<CapabilitiesGLES>(*this);
+  capabilities_ = std::make_shared<CapabilitiesGLES>(*this);
 
   is_valid_ = true;
 }
@@ -120,20 +152,61 @@ bool ProcTableGLES::IsValid() const {
   return is_valid_;
 }
 
-void ProcTableGLES::ShaderSourceMapping(GLuint shader,
-                                        const fml::Mapping& mapping) const {
+void ProcTableGLES::ShaderSourceMapping(
+    GLuint shader,
+    const fml::Mapping& mapping,
+    const std::vector<Scalar>& defines) const {
+  if (defines.empty()) {
+    const GLchar* sources[] = {
+        reinterpret_cast<const GLchar*>(mapping.GetMapping())};
+    const GLint lengths[] = {static_cast<GLint>(mapping.GetSize())};
+    ShaderSource(shader, 1u, sources, lengths);
+    return;
+  }
+  const auto& shader_source = ComputeShaderWithDefines(mapping, defines);
+  if (!shader_source.has_value()) {
+    VALIDATION_LOG << "Failed to append constant data to shader";
+    return;
+  }
+
   const GLchar* sources[] = {
-      reinterpret_cast<const GLchar*>(mapping.GetMapping())};
-  const GLint lengths[] = {static_cast<GLint>(mapping.GetSize())};
+      reinterpret_cast<const GLchar*>(shader_source->c_str())};
+  const GLint lengths[] = {static_cast<GLint>(shader_source->size())};
   ShaderSource(shader, 1u, sources, lengths);
+}
+
+// Visible For testing.
+std::optional<std::string> ProcTableGLES::ComputeShaderWithDefines(
+    const fml::Mapping& mapping,
+    const std::vector<Scalar>& defines) const {
+  std::string shader_source = std::string{
+      reinterpret_cast<const char*>(mapping.GetMapping()), mapping.GetSize()};
+
+  // Look for the first newline after the '#version' header, which impellerc
+  // will always emit as the first line of a compiled shader.
+  size_t index = shader_source.find('\n');
+  if (index == std::string::npos) {
+    VALIDATION_LOG << "Failed to append constant data to shader";
+    return std::nullopt;
+  }
+
+  std::stringstream ss;
+  ss << std::fixed;
+  for (auto i = 0u; i < defines.size(); i++) {
+    ss << "#define SPIRV_CROSS_CONSTANT_ID_" << i << " " << defines[i] << '\n';
+  }
+  auto define_string = ss.str();
+  shader_source.insert(index + 1, define_string);
+  return shader_source;
 }
 
 const DescriptionGLES* ProcTableGLES::GetDescription() const {
   return description_.get();
 }
 
-const CapabilitiesGLES* ProcTableGLES::GetCapabilities() const {
-  return capabilities_.get();
+const std::shared_ptr<const CapabilitiesGLES>& ProcTableGLES::GetCapabilities()
+    const {
+  return capabilities_;
 }
 
 static const char* FramebufferStatusToString(GLenum status) {
@@ -172,24 +245,24 @@ static const char* AttachmentTypeString(GLint type) {
 
 static std::string DescribeFramebufferAttachment(const ProcTableGLES& gl,
                                                  GLenum attachment) {
-  GLint param = GL_NONE;
+  GLint type = GL_NONE;
   gl.GetFramebufferAttachmentParameteriv(
       GL_FRAMEBUFFER,                         // target
       attachment,                             // attachment
       GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE,  // parameter name
-      &param                                  // parameter
+      &type                                   // parameter
   );
 
-  if (param != GL_NONE) {
-    param = GL_NONE;
+  if (type != GL_NONE) {
+    GLint object = GL_NONE;
     gl.GetFramebufferAttachmentParameteriv(
         GL_FRAMEBUFFER,                         // target
         attachment,                             // attachment
         GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME,  // parameter name
-        &param                                  // parameter
+        &object                                 // parameter
     );
     std::stringstream stream;
-    stream << AttachmentTypeString(param) << "(" << param << ")";
+    stream << AttachmentTypeString(type) << "(" << object << ")";
     return stream.str();
   }
 
@@ -199,11 +272,15 @@ static std::string DescribeFramebufferAttachment(const ProcTableGLES& gl,
 std::string ProcTableGLES::DescribeCurrentFramebuffer() const {
   GLint framebuffer = GL_NONE;
   GetIntegerv(GL_FRAMEBUFFER_BINDING, &framebuffer);
+  if (framebuffer == GL_NONE) {
+    return "The default framebuffer (FBO0) was bound.";
+  }
   if (IsFramebuffer(framebuffer) == GL_FALSE) {
-    return "No framebuffer or the default window framebuffer is bound.";
+    return SPrintF("The framebuffer binding (%d) was not a valid framebuffer.",
+                   framebuffer);
   }
 
-  GLenum status = CheckFramebufferStatus(framebuffer);
+  GLenum status = CheckFramebufferStatus(GL_FRAMEBUFFER);
   std::stringstream stream;
   stream << "FBO "
          << ((framebuffer == GL_NONE) ? "(Default)"
@@ -218,10 +295,10 @@ std::string ProcTableGLES::DescribeCurrentFramebuffer() const {
   stream << "Color Attachment: "
          << DescribeFramebufferAttachment(*this, GL_COLOR_ATTACHMENT0)
          << std::endl;
-  stream << "Color Attachment: "
+  stream << "Depth Attachment: "
          << DescribeFramebufferAttachment(*this, GL_DEPTH_ATTACHMENT)
          << std::endl;
-  stream << "Color Attachment: "
+  stream << "Stencil Attachment: "
          << DescribeFramebufferAttachment(*this, GL_STENCIL_ATTACHMENT)
          << std::endl;
   return stream.str();
@@ -234,7 +311,7 @@ bool ProcTableGLES::IsCurrentFramebufferComplete() const {
     // The default framebuffer is always complete.
     return true;
   }
-  GLenum status = CheckFramebufferStatus(framebuffer);
+  GLenum status = CheckFramebufferStatus(GL_FRAMEBUFFER);
   return status == GL_FRAMEBUFFER_COMPLETE;
 }
 
@@ -252,6 +329,8 @@ static std::optional<GLenum> ToDebugIdentifier(DebugResourceType type) {
       return GL_RENDERBUFFER;
     case DebugResourceType::kFrameBuffer:
       return GL_FRAMEBUFFER;
+    case DebugResourceType::kFence:
+      return GL_SYNC_FENCE;
   }
   FML_UNREACHABLE();
 }
@@ -272,17 +351,26 @@ static bool ResourceIsLive(const ProcTableGLES& gl,
       return gl.IsRenderbuffer(name);
     case DebugResourceType::kFrameBuffer:
       return gl.IsFramebuffer(name);
+    case DebugResourceType::kFence:
+      return true;
   }
   FML_UNREACHABLE();
 }
 
-bool ProcTableGLES::SetDebugLabel(DebugResourceType type,
-                                  GLint name,
-                                  const std::string& label) const {
+bool ProcTableGLES::SupportsDebugLabels() const {
   if (debug_label_max_length_ <= 0) {
-    return true;
+    return false;
   }
   if (!ObjectLabelKHR.IsAvailable()) {
+    return false;
+  }
+  return true;
+}
+
+bool ProcTableGLES::SetDebugLabel(DebugResourceType type,
+                                  GLint name,
+                                  std::string_view label) const {
+  if (!SupportsDebugLabels()) {
     return true;
   }
   if (!ResourceIsLive(*this, type, name)) {
@@ -303,9 +391,11 @@ bool ProcTableGLES::SetDebugLabel(DebugResourceType type,
 }
 
 void ProcTableGLES::PushDebugGroup(const std::string& label) const {
+#ifdef IMPELLER_DEBUG
   if (debug_label_max_length_ <= 0) {
     return;
   }
+
   UniqueID id;
   const auto label_length =
       std::min<GLsizei>(debug_label_max_length_ - 1, label.size());
@@ -314,13 +404,17 @@ void ProcTableGLES::PushDebugGroup(const std::string& label) const {
                     label_length,                     // length
                     label.data()                      // message
   );
+#endif  // IMPELLER_DEBUG
 }
 
 void ProcTableGLES::PopDebugGroup() const {
+#ifdef IMPELLER_DEBUG
   if (debug_label_max_length_ <= 0) {
     return;
   }
+
   PopDebugGroupKHR();
+#endif  // IMPELLER_DEBUG
 }
 
 std::string ProcTableGLES::GetProgramInfoLogString(GLuint program) const {
@@ -332,7 +426,7 @@ std::string ProcTableGLES::GetProgramInfoLogString(GLuint program) const {
 
   length = std::min<GLint>(length, 1024);
   Allocation allocation;
-  if (!allocation.Truncate(length, false)) {
+  if (!allocation.Truncate(Bytes{length}, false)) {
     return "";
   }
   GetProgramInfoLog(program,  // program

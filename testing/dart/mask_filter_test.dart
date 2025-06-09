@@ -4,7 +4,7 @@
 
 import 'dart:ui';
 
-import 'package:litetest/litetest.dart';
+import 'package:test/test.dart';
 
 void main() {
   test('MaskFilter - NOP blur does not crash', () async {
@@ -22,7 +22,6 @@ void main() {
     builder.addPicture(Offset.zero, picture);
 
     final Scene scene = builder.build();
-    expect(scene != null, true);
     await scene.toImage(100, 100);
   });
 }

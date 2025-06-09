@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <thread>
+#include <utility>
 
 #include "flutter/fml/synchronization/count_down_latch.h"
 #include "flutter/fml/synchronization/waitable_event.h"
@@ -22,7 +23,7 @@ class TestWakeable : public fml::Wakeable {
  public:
   using WakeUpCall = std::function<void(const fml::TimePoint)>;
 
-  explicit TestWakeable(WakeUpCall call) : wake_up_call_(call) {}
+  explicit TestWakeable(WakeUpCall call) : wake_up_call_(std::move(call)) {}
 
   void WakeUp(fml::TimePoint time_point) override { wake_up_call_(time_point); }
 
@@ -45,8 +46,7 @@ TEST(MessageLoopTaskQueue, RegisterOneTask) {
       [&time](fml::TimePoint wake_time) { ASSERT_TRUE(wake_time == time); });
   task_queue->SetWakeable(queue_id, wakeable.get());
 
-  task_queue->RegisterTask(
-      queue_id, [] {}, time);
+  task_queue->RegisterTask(queue_id, [] {}, time);
   ASSERT_TRUE(task_queue->HasPendingTasks(queue_id));
   ASSERT_TRUE(task_queue->GetNumPendingTasks(queue_id) == 1);
 }
@@ -54,10 +54,8 @@ TEST(MessageLoopTaskQueue, RegisterOneTask) {
 TEST(MessageLoopTaskQueue, RegisterTwoTasksAndCount) {
   auto task_queue = fml::MessageLoopTaskQueues::GetInstance();
   auto queue_id = task_queue->CreateTaskQueue();
-  task_queue->RegisterTask(
-      queue_id, [] {}, ChronoTicksSinceEpoch());
-  task_queue->RegisterTask(
-      queue_id, [] {}, fml::TimePoint::Max());
+  task_queue->RegisterTask(queue_id, [] {}, ChronoTicksSinceEpoch());
+  task_queue->RegisterTask(queue_id, [] {}, fml::TimePoint::Max());
   ASSERT_TRUE(task_queue->HasPendingTasks(queue_id));
   ASSERT_TRUE(task_queue->GetNumPendingTasks(queue_id) == 2);
 }
@@ -67,11 +65,9 @@ TEST(MessageLoopTaskQueue, RegisterTasksOnMergedQueuesAndCount) {
   auto platform_queue = task_queue->CreateTaskQueue();
   auto raster_queue = task_queue->CreateTaskQueue();
   // A task in platform_queue
-  task_queue->RegisterTask(
-      platform_queue, []() {}, fml::TimePoint::Now());
+  task_queue->RegisterTask(platform_queue, []() {}, fml::TimePoint::Now());
   // A task in raster_queue
-  task_queue->RegisterTask(
-      raster_queue, []() {}, fml::TimePoint::Now());
+  task_queue->RegisterTask(raster_queue, []() {}, fml::TimePoint::Now());
   ASSERT_TRUE(task_queue->GetNumPendingTasks(platform_queue) == 1);
   ASSERT_TRUE(task_queue->GetNumPendingTasks(raster_queue) == 1);
 
@@ -269,10 +265,8 @@ TEST(MessageLoopTaskQueue, WakeUpIndependentOfTime) {
       [&num_wakes](fml::TimePoint wake_time) { ++num_wakes; });
   task_queue->SetWakeable(queue_id, wakeable.get());
 
-  task_queue->RegisterTask(
-      queue_id, []() {}, ChronoTicksSinceEpoch());
-  task_queue->RegisterTask(
-      queue_id, []() {}, fml::TimePoint::Max());
+  task_queue->RegisterTask(queue_id, []() {}, ChronoTicksSinceEpoch());
+  task_queue->RegisterTask(queue_id, []() {}, fml::TimePoint::Max());
 
   ASSERT_TRUE(num_wakes == 2);
 }
@@ -292,13 +286,11 @@ TEST(MessageLoopTaskQueue, WokenUpWithNewerTime) {
 
   task_queue->SetWakeable(queue_id, wakeable.get());
 
-  task_queue->RegisterTask(
-      queue_id, []() {}, fml::TimePoint::Max());
+  task_queue->RegisterTask(queue_id, []() {}, fml::TimePoint::Max());
 
   const auto now = ChronoTicksSinceEpoch();
   expected = now;
-  task_queue->RegisterTask(
-      queue_id, []() {}, now);
+  task_queue->RegisterTask(queue_id, []() {}, now);
 
   latch.Wait();
 }
@@ -337,9 +329,9 @@ TEST(MessageLoopTaskQueue, QueueDoNotOwnItself) {
 
 TEST(MessageLoopTaskQueue, QueueDoNotOwnUnmergedTaskQueueId) {
   auto task_queue = fml::MessageLoopTaskQueues::GetInstance();
-  ASSERT_FALSE(task_queue->Owns(task_queue->CreateTaskQueue(), _kUnmerged));
-  ASSERT_FALSE(task_queue->Owns(_kUnmerged, task_queue->CreateTaskQueue()));
-  ASSERT_FALSE(task_queue->Owns(_kUnmerged, _kUnmerged));
+  ASSERT_FALSE(task_queue->Owns(task_queue->CreateTaskQueue(), kUnmerged));
+  ASSERT_FALSE(task_queue->Owns(kUnmerged, task_queue->CreateTaskQueue()));
+  ASSERT_FALSE(task_queue->Owns(kUnmerged, kUnmerged));
 }
 
 TEST(MessageLoopTaskQueue, QueueOwnsMergedTaskQueueId) {
@@ -434,16 +426,14 @@ TEST(MessageLoopTaskQueue, RegisterTaskWakesUpOwnerQueue) {
 
   ASSERT_EQ(0UL, wakes.size());
 
-  task_queue->RegisterTask(
-      platform_queue, []() {}, time1);
+  task_queue->RegisterTask(platform_queue, []() {}, time1);
 
   ASSERT_EQ(1UL, wakes.size());
   ASSERT_EQ(time1, wakes[0]);
 
   task_queue->Merge(platform_queue, raster_queue);
 
-  task_queue->RegisterTask(
-      raster_queue, []() {}, time2);
+  task_queue->RegisterTask(raster_queue, []() {}, time2);
 
   ASSERT_EQ(3UL, wakes.size());
   ASSERT_EQ(time1, wakes[1]);

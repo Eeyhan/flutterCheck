@@ -6,33 +6,40 @@
 
 #include "flutter/fml/closure.h"
 #include "flutter/fml/logging.h"
-#include "flutter/fml/trace_event.h"
+#include "flutter/fml/make_copyable.h"
+#include "fml/status.h"
+
 #include "impeller/base/backend_cast.h"
+#include "impeller/core/formats.h"
+#include "impeller/core/host_buffer.h"
+#include "impeller/core/shader_types.h"
+#include "impeller/renderer/backend/metal/context_mtl.h"
 #include "impeller/renderer/backend/metal/device_buffer_mtl.h"
 #include "impeller/renderer/backend/metal/formats_mtl.h"
 #include "impeller/renderer/backend/metal/pipeline_mtl.h"
 #include "impeller/renderer/backend/metal/sampler_mtl.h"
 #include "impeller/renderer/backend/metal/texture_mtl.h"
-#include "impeller/renderer/formats.h"
-#include "impeller/renderer/host_buffer.h"
-#include "impeller/renderer/shader_types.h"
+#include "impeller/renderer/command.h"
+#include "impeller/renderer/vertex_descriptor.h"
 
 namespace impeller {
 
 static bool ConfigureResolveTextureAttachment(
     const Attachment& desc,
     MTLRenderPassAttachmentDescriptor* attachment) {
-  if (desc.store_action == StoreAction::kMultisampleResolve &&
-      !desc.resolve_texture) {
+  bool needs_resolve =
+      desc.store_action == StoreAction::kMultisampleResolve ||
+      desc.store_action == StoreAction::kStoreAndMultisampleResolve;
+
+  if (needs_resolve && !desc.resolve_texture) {
     VALIDATION_LOG << "Resolve store action specified on attachment but no "
                       "resolve texture was specified.";
     return false;
   }
 
-  if (desc.resolve_texture &&
-      desc.store_action != StoreAction::kMultisampleResolve) {
-    VALIDATION_LOG << "Resolve store action specified but there was no "
-                      "resolve attachment.";
+  if (desc.resolve_texture && !needs_resolve) {
+    VALIDATION_LOG << "A resolve texture was specified even though the store "
+                      "action doesn't require it.";
     return false;
   }
 
@@ -93,20 +100,19 @@ static bool ConfigureStencilAttachment(
   return true;
 }
 
-// TODO(csg): Move this to formats_mtl.h
 static MTLRenderPassDescriptor* ToMTLRenderPassDescriptor(
     const RenderTarget& desc) {
   auto result = [MTLRenderPassDescriptor renderPassDescriptor];
 
-  const auto& colors = desc.GetColorAttachments();
+  bool configured_attachment = desc.IterateAllColorAttachments(
+      [&result](size_t index, const ColorAttachment& attachment) -> bool {
+        return ConfigureColorAttachment(attachment,
+                                        result.colorAttachments[index]);
+      });
 
-  for (const auto& color : colors) {
-    if (!ConfigureColorAttachment(color.second,
-                                  result.colorAttachments[color.first])) {
-      VALIDATION_LOG << "Could not configure color attachment at index "
-                     << color.first;
-      return nil;
-    }
+  if (!configured_attachment) {
+    VALIDATION_LOG << "Could not configure color attachments";
+    return nil;
   }
 
   const auto& depth = desc.GetDepthAttachment();
@@ -128,204 +134,66 @@ static MTLRenderPassDescriptor* ToMTLRenderPassDescriptor(
   return result;
 }
 
-RenderPassMTL::RenderPassMTL(id<MTLCommandBuffer> buffer, RenderTarget target)
-    : RenderPass(std::move(target)),
+RenderPassMTL::RenderPassMTL(std::shared_ptr<const Context> context,
+                             const RenderTarget& target,
+                             id<MTLCommandBuffer> buffer)
+    : RenderPass(std::move(context), target),
       buffer_(buffer),
       desc_(ToMTLRenderPassDescriptor(GetRenderTarget())) {
   if (!buffer_ || !desc_ || !render_target_.IsValid()) {
     return;
   }
+  encoder_ = [buffer_ renderCommandEncoderWithDescriptor:desc_];
+
+  if (!encoder_) {
+    return;
+  }
+#ifdef IMPELLER_DEBUG
+  is_metal_trace_active_ =
+      [[MTLCaptureManager sharedCaptureManager] isCapturing];
+#endif  // IMPELLER_DEBUG
+  pass_bindings_.SetEncoder(encoder_);
+  pass_bindings_.SetViewport(
+      Viewport{.rect = Rect::MakeSize(GetRenderTargetSize())});
+  pass_bindings_.SetScissor(IRect::MakeSize(GetRenderTargetSize()));
   is_valid_ = true;
 }
 
-RenderPassMTL::~RenderPassMTL() = default;
+RenderPassMTL::~RenderPassMTL() {
+  if (!did_finish_encoding_) {
+    [encoder_ endEncoding];
+    did_finish_encoding_ = true;
+  }
+}
 
 bool RenderPassMTL::IsValid() const {
   return is_valid_;
 }
 
-void RenderPassMTL::OnSetLabel(std::string label) {
+void RenderPassMTL::OnSetLabel(std::string_view label) {
+#ifdef IMPELLER_DEBUG
   if (label.empty()) {
     return;
   }
-  label_ = std::move(label);
+  encoder_.label = @(std::string(label).c_str());
+#endif  // IMPELLER_DEBUG
 }
 
-bool RenderPassMTL::EncodeCommands(
-    const std::shared_ptr<Allocator>& transients_allocator) const {
-  TRACE_EVENT0("impeller", "RenderPassMTL::EncodeCommands");
-  if (!IsValid()) {
-    return false;
-  }
-  auto render_command_encoder =
-      [buffer_ renderCommandEncoderWithDescriptor:desc_];
-
-  if (!render_command_encoder) {
-    return false;
-  }
-
-  if (!label_.empty()) {
-    [render_command_encoder setLabel:@(label_.c_str())];
-  }
-
-  // Success or failure, the pass must end. The buffer can only process one pass
-  // at a time.
-  fml::ScopedCleanupClosure auto_end(
-      [render_command_encoder]() { [render_command_encoder endEncoding]; });
-
-  return EncodeCommands(transients_allocator, render_command_encoder);
+bool RenderPassMTL::OnEncodeCommands(const Context& context) const {
+  did_finish_encoding_ = true;
+  [encoder_ endEncoding];
+  return true;
 }
 
-//-----------------------------------------------------------------------------
-/// @brief      Ensures that bindings on the pass are not redundantly set or
-///             updated. Avoids making the driver do additional checks and makes
-///             the frame insights during profiling and instrumentation not
-///             complain about the same.
-///
-///             There should be no change to rendering if this caching was
-///             absent.
-///
-struct PassBindingsCache {
-  explicit PassBindingsCache(id<MTLRenderCommandEncoder> encoder)
-      : encoder_(encoder) {}
-
-  PassBindingsCache(const PassBindingsCache&) = delete;
-
-  PassBindingsCache(PassBindingsCache&&) = delete;
-
-  void SetRenderPipelineState(id<MTLRenderPipelineState> pipeline) {
-    if (pipeline == pipeline_) {
-      return;
-    }
-    pipeline_ = pipeline;
-    [encoder_ setRenderPipelineState:pipeline_];
-  }
-
-  void SetDepthStencilState(id<MTLDepthStencilState> depth_stencil) {
-    if (depth_stencil_ == depth_stencil) {
-      return;
-    }
-    depth_stencil_ = depth_stencil;
-    [encoder_ setDepthStencilState:depth_stencil_];
-  }
-
-  bool SetBuffer(ShaderStage stage,
-                 uint64_t index,
-                 uint64_t offset,
-                 id<MTLBuffer> buffer) {
-    auto& buffers_map = buffers_[stage];
-    auto found = buffers_map.find(index);
-    if (found != buffers_map.end() && found->second.buffer == buffer) {
-      // The right buffer is bound. Check if its offset needs to be updated.
-      if (found->second.offset == offset) {
-        // Buffer and its offset is identical. Nothing to do.
-        return true;
-      }
-
-      // Only the offset needs to be updated.
-      found->second.offset = offset;
-
-      switch (stage) {
-        case ShaderStage::kVertex:
-          [encoder_ setVertexBufferOffset:offset atIndex:index];
-          return true;
-        case ShaderStage::kFragment:
-          [encoder_ setFragmentBufferOffset:offset atIndex:index];
-          return true;
-        default:
-          VALIDATION_LOG << "Cannot update buffer offset of an unknown stage.";
-          return false;
-      }
-      return true;
-    }
-    buffers_map[index] = {buffer, static_cast<size_t>(offset)};
-    switch (stage) {
-      case ShaderStage::kVertex:
-        [encoder_ setVertexBuffer:buffer offset:offset atIndex:index];
-        return true;
-      case ShaderStage::kFragment:
-        [encoder_ setFragmentBuffer:buffer offset:offset atIndex:index];
-        return true;
-      default:
-        VALIDATION_LOG << "Cannot bind buffer to unknown shader stage.";
-        return false;
-    }
-    return false;
-  }
-
-  bool SetTexture(ShaderStage stage, uint64_t index, id<MTLTexture> texture) {
-    auto& texture_map = textures_[stage];
-    auto found = texture_map.find(index);
-    if (found != texture_map.end() && found->second == texture) {
-      // Already bound.
-      return true;
-    }
-    texture_map[index] = texture;
-    switch (stage) {
-      case ShaderStage::kVertex:
-        [encoder_ setVertexTexture:texture atIndex:index];
-        return true;
-      case ShaderStage::kFragment:
-        [encoder_ setFragmentTexture:texture atIndex:index];
-        return true;
-      default:
-        VALIDATION_LOG << "Cannot bind buffer to unknown shader stage.";
-        return false;
-    }
-    return false;
-  }
-
-  bool SetSampler(ShaderStage stage,
-                  uint64_t index,
-                  id<MTLSamplerState> sampler) {
-    auto& sampler_map = samplers_[stage];
-    auto found = sampler_map.find(index);
-    if (found != sampler_map.end() && found->second == sampler) {
-      // Already bound.
-      return true;
-    }
-    sampler_map[index] = sampler;
-    switch (stage) {
-      case ShaderStage::kVertex:
-        [encoder_ setVertexSamplerState:sampler atIndex:index];
-        return true;
-      case ShaderStage::kFragment:
-        [encoder_ setFragmentSamplerState:sampler atIndex:index];
-        return true;
-      default:
-        VALIDATION_LOG << "Cannot bind buffer to unknown shader stage.";
-        return false;
-    }
-    return false;
-  }
-
- private:
-  struct BufferOffsetPair {
-    id<MTLBuffer> buffer = nullptr;
-    size_t offset = 0u;
-  };
-  using BufferMap = std::map<uint64_t, BufferOffsetPair>;
-  using TextureMap = std::map<uint64_t, id<MTLTexture>>;
-  using SamplerMap = std::map<uint64_t, id<MTLSamplerState>>;
-
-  const id<MTLRenderCommandEncoder> encoder_;
-  id<MTLRenderPipelineState> pipeline_ = nullptr;
-  id<MTLDepthStencilState> depth_stencil_ = nullptr;
-  std::map<ShaderStage, BufferMap> buffers_;
-  std::map<ShaderStage, TextureMap> textures_;
-  std::map<ShaderStage, SamplerMap> samplers_;
-};
-
-static bool Bind(PassBindingsCache& pass,
-                 Allocator& allocator,
+static bool Bind(PassBindingsCacheMTL& pass,
                  ShaderStage stage,
                  size_t bind_index,
                  const BufferView& view) {
-  if (!view.buffer) {
+  if (!view.GetBuffer()) {
     return false;
   }
 
-  auto device_buffer = view.buffer->GetDeviceBuffer(allocator);
+  const DeviceBuffer* device_buffer = view.GetBuffer();
   if (!device_buffer) {
     return false;
   }
@@ -336,158 +204,225 @@ static bool Bind(PassBindingsCache& pass,
     return false;
   }
 
-  return pass.SetBuffer(stage, bind_index, view.range.offset, buffer);
+  return pass.SetBuffer(stage, bind_index, view.GetRange().offset, buffer);
 }
 
-static bool Bind(PassBindingsCache& pass,
+static bool Bind(PassBindingsCacheMTL& pass,
                  ShaderStage stage,
                  size_t bind_index,
+                 raw_ptr<const Sampler> sampler,
                  const Texture& texture) {
-  if (!texture.IsValid()) {
+  if (!sampler || !texture.IsValid()) {
     return false;
+  }
+
+  if (texture.NeedsMipmapGeneration()) {
+    // TODO(127697): generate mips when the GPU is available on iOS.
+#if !FML_OS_IOS
+    VALIDATION_LOG
+        << "Texture at binding index " << bind_index
+        << " has a mip count > 1, but the mipmap has not been generated.";
+    return false;
+#endif  // !FML_OS_IOS
   }
 
   return pass.SetTexture(stage, bind_index,
-                         TextureMTL::Cast(texture).GetMTLTexture());
+                         TextureMTL::Cast(texture).GetMTLTexture()) &&
+         pass.SetSampler(stage, bind_index,
+                         SamplerMTL::Cast(*sampler).GetMTLSamplerState());
 }
 
-static bool Bind(PassBindingsCache& pass,
-                 ShaderStage stage,
-                 size_t bind_index,
-                 const Sampler& sampler) {
-  if (!sampler.IsValid()) {
+// |RenderPass|
+void RenderPassMTL::SetPipeline(PipelineRef pipeline) {
+  const PipelineDescriptor& pipeline_desc = pipeline->GetDescriptor();
+  primitive_type_ = pipeline_desc.GetPrimitiveType();
+  pass_bindings_.SetRenderPipelineState(
+      PipelineMTL::Cast(*pipeline).GetMTLRenderPipelineState());
+  pass_bindings_.SetDepthStencilState(
+      PipelineMTL::Cast(*pipeline).GetMTLDepthStencilState());
+
+  [encoder_ setFrontFacingWinding:pipeline_desc.GetWindingOrder() ==
+                                          WindingOrder::kClockwise
+                                      ? MTLWindingClockwise
+                                      : MTLWindingCounterClockwise];
+  [encoder_ setCullMode:ToMTLCullMode(pipeline_desc.GetCullMode())];
+  [encoder_ setTriangleFillMode:ToMTLTriangleFillMode(
+                                    pipeline_desc.GetPolygonMode())];
+  has_valid_pipeline_ = true;
+}
+
+// |RenderPass|
+void RenderPassMTL::SetCommandLabel(std::string_view label) {
+#ifdef IMPELLER_DEBUG
+  if (is_metal_trace_active_) {
+    has_label_ = true;
+    std::string label_copy(label);
+    [encoder_ pushDebugGroup:@(label_copy.c_str())];
+  }
+#endif  // IMPELLER_DEBUG
+}
+
+// |RenderPass|
+void RenderPassMTL::SetStencilReference(uint32_t value) {
+  [encoder_ setStencilReferenceValue:value];
+}
+
+// |RenderPass|
+void RenderPassMTL::SetBaseVertex(uint64_t value) {
+  base_vertex_ = value;
+}
+
+// |RenderPass|
+void RenderPassMTL::SetViewport(Viewport viewport) {
+  pass_bindings_.SetViewport(viewport);
+}
+
+// |RenderPass|
+void RenderPassMTL::SetScissor(IRect scissor) {
+  pass_bindings_.SetScissor(scissor);
+}
+
+// |RenderPass|
+void RenderPassMTL::SetElementCount(size_t count) {
+  vertex_count_ = count;
+}
+
+// |RenderPass|
+void RenderPassMTL::SetInstanceCount(size_t count) {
+  instance_count_ = count;
+}
+
+// |RenderPass|
+bool RenderPassMTL::SetVertexBuffer(BufferView vertex_buffers[],
+                                    size_t vertex_buffer_count) {
+  if (!ValidateVertexBuffers(vertex_buffers, vertex_buffer_count)) {
     return false;
   }
 
-  return pass.SetSampler(stage, bind_index,
-                         SamplerMTL::Cast(sampler).GetMTLSamplerState());
+  for (size_t i = 0; i < vertex_buffer_count; i++) {
+    if (!Bind(pass_bindings_, ShaderStage::kVertex,
+              VertexDescriptor::kReservedVertexBufferIndex - i,
+              vertex_buffers[i])) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
-bool RenderPassMTL::EncodeCommands(const std::shared_ptr<Allocator>& allocator,
-                                   id<MTLRenderCommandEncoder> encoder) const {
-  PassBindingsCache pass_bindings(encoder);
-  auto bind_stage_resources = [&allocator, &pass_bindings](
-                                  const Bindings& bindings,
-                                  ShaderStage stage) -> bool {
-    for (const auto& buffer : bindings.buffers) {
-      if (!Bind(pass_bindings, *allocator, stage, buffer.first,
-                buffer.second.resource)) {
-        return false;
-      }
-    }
-    for (const auto& texture : bindings.textures) {
-      if (!Bind(pass_bindings, stage, texture.first,
-                *texture.second.resource)) {
-        return false;
-      }
-    }
-    for (const auto& sampler : bindings.samplers) {
-      if (!Bind(pass_bindings, stage, sampler.first,
-                *sampler.second.resource)) {
-        return false;
-      }
-    }
-    return true;
-  };
-
-  const auto target_sample_count = render_target_.GetSampleCount();
-
-  fml::closure pop_debug_marker = [encoder]() { [encoder popDebugGroup]; };
-  for (const auto& command : commands_) {
-    if (command.index_count == 0u) {
-      continue;
-    }
-    if (command.instance_count == 0u) {
-      continue;
-    }
-
-    fml::ScopedCleanupClosure auto_pop_debug_marker(pop_debug_marker);
-    if (!command.label.empty()) {
-      [encoder pushDebugGroup:@(command.label.c_str())];
-    } else {
-      auto_pop_debug_marker.Release();
-    }
-
-    if (target_sample_count !=
-        command.pipeline->GetDescriptor().GetSampleCount()) {
-      VALIDATION_LOG << "Pipeline for command and the render target disagree "
-                        "on sample counts (target was "
-                     << static_cast<uint64_t>(target_sample_count)
-                     << " but pipeline wanted "
-                     << static_cast<uint64_t>(
-                            command.pipeline->GetDescriptor().GetSampleCount())
-                     << ").";
-      return false;
-    }
-
-    pass_bindings.SetRenderPipelineState(
-        PipelineMTL::Cast(*command.pipeline).GetMTLRenderPipelineState());
-    pass_bindings.SetDepthStencilState(
-        PipelineMTL::Cast(*command.pipeline).GetMTLDepthStencilState());
-    [encoder setFrontFacingWinding:command.winding == WindingOrder::kClockwise
-                                       ? MTLWindingClockwise
-                                       : MTLWindingCounterClockwise];
-    [encoder setCullMode:ToMTLCullMode(command.cull_mode)];
-    [encoder setStencilReferenceValue:command.stencil_reference];
-
-    auto v = command.viewport.value_or<Viewport>(
-        {.rect = Rect::MakeSize(Size(GetRenderTargetSize()))});
-    MTLViewport viewport = {
-        .originX = v.rect.origin.x,
-        .originY = v.rect.origin.y,
-        .width = v.rect.size.width,
-        .height = v.rect.size.height,
-        .znear = v.depth_range.z_near,
-        .zfar = v.depth_range.z_far,
-    };
-    [encoder setViewport:viewport];
-
-    auto s = command.scissor.value_or(IRect::MakeSize(GetRenderTargetSize()));
-    MTLScissorRect scissor = {
-        .x = static_cast<NSUInteger>(s.origin.x),
-        .y = static_cast<NSUInteger>(s.origin.y),
-        .width = static_cast<NSUInteger>(s.size.width),
-        .height = static_cast<NSUInteger>(s.size.height),
-    };
-    [encoder setScissorRect:scissor];
-
-    if (!bind_stage_resources(command.vertex_bindings, ShaderStage::kVertex)) {
-      return false;
-    }
-    if (!bind_stage_resources(command.fragment_bindings,
-                              ShaderStage::kFragment)) {
-      return false;
-    }
-    if (command.index_type == IndexType::kUnknown) {
-      return false;
-    }
-    auto index_buffer = command.index_buffer.buffer;
-    if (!index_buffer) {
-      return false;
-    }
-    auto device_buffer = index_buffer->GetDeviceBuffer(*allocator);
-    if (!device_buffer) {
-      return false;
-    }
-    auto mtl_index_buffer =
-        DeviceBufferMTL::Cast(*device_buffer).GetMTLBuffer();
-    if (!mtl_index_buffer) {
-      return false;
-    }
-    FML_DCHECK(command.index_count *
-                   (command.index_type == IndexType::k16bit ? 2 : 4) ==
-               command.index_buffer.range.length);
-    // Returns void. All error checking must be done by this point.
-    [encoder drawIndexedPrimitives:ToMTLPrimitiveType(command.primitive_type)
-                        indexCount:command.index_count
-                         indexType:ToMTLIndexType(command.index_type)
-                       indexBuffer:mtl_index_buffer
-                 indexBufferOffset:command.index_buffer.range.offset
-                     instanceCount:command.instance_count
-                        baseVertex:command.base_vertex
-                      baseInstance:0u];
+// |RenderPass|
+bool RenderPassMTL::SetIndexBuffer(BufferView index_buffer,
+                                   IndexType index_type) {
+  if (!ValidateIndexBuffer(index_buffer, index_type)) {
+    return false;
   }
+
+  if (index_type != IndexType::kNone) {
+    index_type_ = ToMTLIndexType(index_type);
+    index_buffer_ = std::move(index_buffer);
+  }
+
   return true;
+}
+
+// |RenderPass|
+fml::Status RenderPassMTL::Draw() {
+  if (!has_valid_pipeline_) {
+    return fml::Status(fml::StatusCode::kCancelled, "Invalid pipeline.");
+  }
+
+  if (!index_buffer_) {
+    if (instance_count_ != 1u) {
+      [encoder_ drawPrimitives:ToMTLPrimitiveType(primitive_type_)
+                   vertexStart:base_vertex_
+                   vertexCount:vertex_count_
+                 instanceCount:instance_count_
+                  baseInstance:0u];
+    } else {
+      [encoder_ drawPrimitives:ToMTLPrimitiveType(primitive_type_)
+                   vertexStart:base_vertex_
+                   vertexCount:vertex_count_];
+    }
+  } else {
+    id<MTLBuffer> mtl_index_buffer =
+        DeviceBufferMTL::Cast(*index_buffer_.GetBuffer()).GetMTLBuffer();
+    if (instance_count_ != 1u) {
+      [encoder_ drawIndexedPrimitives:ToMTLPrimitiveType(primitive_type_)
+                           indexCount:vertex_count_
+                            indexType:index_type_
+                          indexBuffer:mtl_index_buffer
+                    indexBufferOffset:index_buffer_.GetRange().offset
+                        instanceCount:instance_count_
+                           baseVertex:base_vertex_
+                         baseInstance:0u];
+    } else {
+      [encoder_ drawIndexedPrimitives:ToMTLPrimitiveType(primitive_type_)
+                           indexCount:vertex_count_
+                            indexType:index_type_
+                          indexBuffer:mtl_index_buffer
+                    indexBufferOffset:index_buffer_.GetRange().offset];
+    }
+  }
+
+#ifdef IMPELLER_DEBUG
+  if (has_label_) {
+    [encoder_ popDebugGroup];
+  }
+#endif  // IMPELLER_DEBUG
+
+  vertex_count_ = 0u;
+  base_vertex_ = 0u;
+  instance_count_ = 1u;
+  index_buffer_ = {};
+  has_valid_pipeline_ = false;
+  has_label_ = false;
+
+  return fml::Status();
+}
+
+// |RenderPass|
+bool RenderPassMTL::BindResource(ShaderStage stage,
+                                 DescriptorType type,
+                                 const ShaderUniformSlot& slot,
+                                 const ShaderMetadata* metadata,
+                                 BufferView view) {
+  return Bind(pass_bindings_, stage, slot.ext_res_0, view);
+}
+
+// |RenderPass|
+bool RenderPassMTL::BindDynamicResource(
+    ShaderStage stage,
+    DescriptorType type,
+    const ShaderUniformSlot& slot,
+    std::unique_ptr<ShaderMetadata> metadata,
+    BufferView view) {
+  return Bind(pass_bindings_, stage, slot.ext_res_0, view);
+}
+
+// |RenderPass|
+bool RenderPassMTL::BindResource(ShaderStage stage,
+                                 DescriptorType type,
+                                 const SampledImageSlot& slot,
+                                 const ShaderMetadata* metadata,
+                                 std::shared_ptr<const Texture> texture,
+                                 raw_ptr<const Sampler> sampler) {
+  if (!texture) {
+    return false;
+  }
+  return Bind(pass_bindings_, stage, slot.texture_index, sampler, *texture);
+}
+
+bool RenderPassMTL::BindDynamicResource(
+    ShaderStage stage,
+    DescriptorType type,
+    const SampledImageSlot& slot,
+    std::unique_ptr<ShaderMetadata> metadata,
+    std::shared_ptr<const Texture> texture,
+    raw_ptr<const Sampler> sampler) {
+  if (!texture) {
+    return false;
+  }
+  return Bind(pass_bindings_, stage, slot.texture_index, sampler, *texture);
 }
 
 }  // namespace impeller

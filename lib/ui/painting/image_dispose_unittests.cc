@@ -5,6 +5,7 @@
 #define FML_USED_ON_EMBEDDER
 
 #include "flutter/common/task_runners.h"
+#include "flutter/fml/synchronization/count_down_latch.h"
 #include "flutter/fml/synchronization/waitable_event.h"
 #include "flutter/lib/ui/painting/canvas.h"
 #include "flutter/lib/ui/painting/image.h"
@@ -57,6 +58,10 @@ TEST_F(ImageDisposeTest, ImageReleasedAfterFrameAndDisposePictureAndLayer) {
   };
 
   Settings settings = CreateSettingsForFixture();
+  fml::CountDownLatch frame_latch{2};
+  settings.frame_rasterized_callback = [&frame_latch](const FrameTiming& t) {
+    frame_latch.CountDown();
+  };
   auto task_runner = CreateNewThread();
   TaskRunners task_runners("test",                  // label
                            GetCurrentTaskRunner(),  // platform
@@ -69,7 +74,7 @@ TEST_F(ImageDisposeTest, ImageReleasedAfterFrameAndDisposePictureAndLayer) {
                     CREATE_NATIVE_ENTRY(native_capture_image_and_picture));
   AddNativeCallback("Finish", CREATE_NATIVE_ENTRY(native_finish));
 
-  std::unique_ptr<Shell> shell = CreateShell(std::move(settings), task_runners);
+  std::unique_ptr<Shell> shell = CreateShell(settings, task_runners);
 
   ASSERT_TRUE(shell->IsSetup());
 
@@ -83,11 +88,14 @@ TEST_F(ImageDisposeTest, ImageReleasedAfterFrameAndDisposePictureAndLayer) {
   shell->RunEngine(std::move(configuration), [&](auto result) {
     ASSERT_EQ(result, Engine::RunStatus::Success);
   });
-
   message_latch_.Wait();
 
   ASSERT_TRUE(current_display_list_);
   ASSERT_TRUE(current_image_);
+
+  // Wait for 2 frames to be rasterized. The 2nd frame releases resources of the
+  // 1st frame.
+  frame_latch.Wait();
 
   // Force a drain the SkiaUnrefQueue. The engine does this normally as frames
   // pump, but we force it here to make the test more deterministic.
@@ -107,7 +115,7 @@ TEST_F(ImageDisposeTest, ImageReleasedAfterFrameAndDisposePictureAndLayer) {
   current_image_.reset();
 
   shell->GetPlatformView()->NotifyDestroyed();
-  DestroyShell(std::move(shell), std::move(task_runners));
+  DestroyShell(std::move(shell), task_runners);
 }
 
 }  // namespace testing

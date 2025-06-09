@@ -6,25 +6,21 @@
 
 namespace impeller {
 
-PipelineGLES::PipelineGLES(ReactorGLES::Ref reactor,
+PipelineGLES::PipelineGLES(std::shared_ptr<ReactorGLES> reactor,
                            std::weak_ptr<PipelineLibrary> library,
-                           PipelineDescriptor desc)
-    : Pipeline(std::move(library), std::move(desc)),
+                           const PipelineDescriptor& desc,
+                           std::shared_ptr<UniqueHandleGLES> handle)
+    : Pipeline(std::move(library), desc),
       reactor_(std::move(reactor)),
-      handle_(reactor_ ? reactor_->CreateHandle(HandleType::kProgram)
-                       : HandleGLES::DeadHandle()),
-      is_valid_(!handle_.IsDead()) {
+      handle_(std::move(handle)),
+      is_valid_(handle_->IsValid()) {
   if (is_valid_) {
-    reactor_->SetDebugLabel(handle_, GetDescriptor().GetLabel());
+    reactor_->SetDebugLabel(handle_->Get(), GetDescriptor().GetLabel());
   }
 }
 
 // |Pipeline|
-PipelineGLES::~PipelineGLES() {
-  if (!handle_.IsDead()) {
-    reactor_->CollectHandle(std::move(handle_));
-  }
-}
+PipelineGLES::~PipelineGLES() = default;
 
 // |Pipeline|
 bool PipelineGLES::IsValid() const {
@@ -32,10 +28,14 @@ bool PipelineGLES::IsValid() const {
 }
 
 const HandleGLES& PipelineGLES::GetProgramHandle() const {
+  return handle_->Get();
+}
+
+const std::shared_ptr<UniqueHandleGLES> PipelineGLES::GetSharedHandle() const {
   return handle_;
 }
 
-const BufferBindingsGLES* PipelineGLES::GetBufferBindings() const {
+BufferBindingsGLES* PipelineGLES::GetBufferBindings() const {
   return buffer_bindings_.get();
 }
 
@@ -46,7 +46,8 @@ bool PipelineGLES::BuildVertexDescriptor(const ProcTableGLES& gl,
   }
   auto vtx_desc = std::make_unique<BufferBindingsGLES>();
   if (!vtx_desc->RegisterVertexStageInput(
-          gl, GetDescriptor().GetVertexDescriptor()->GetStageInputs())) {
+          gl, GetDescriptor().GetVertexDescriptor()->GetStageInputs(),
+          GetDescriptor().GetVertexDescriptor()->GetStageLayouts())) {
     return false;
   }
   if (!vtx_desc->ReadUniformsBindings(gl, program)) {
@@ -57,10 +58,10 @@ bool PipelineGLES::BuildVertexDescriptor(const ProcTableGLES& gl,
 }
 
 [[nodiscard]] bool PipelineGLES::BindProgram() const {
-  if (handle_.IsDead()) {
+  if (!handle_->IsValid()) {
     return false;
   }
-  auto handle = reactor_->GetGLHandle(handle_);
+  auto handle = reactor_->GetGLHandle(handle_->Get());
   if (!handle.has_value()) {
     return false;
   }

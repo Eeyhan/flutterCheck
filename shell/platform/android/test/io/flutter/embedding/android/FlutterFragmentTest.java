@@ -1,3 +1,7 @@
+// Copyright 2013 The Flutter Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
 package io.flutter.embedding.android;
 
 import static org.junit.Assert.assertArrayEquals;
@@ -93,6 +97,35 @@ public class FlutterFragmentTest {
     assertEquals("package:foo/bar.dart", fragment.getDartEntrypointLibraryUri());
     assertEquals("/custom/route", fragment.getInitialRoute());
     assertArrayEquals(new String[] {"foo", "bar"}, fragment.getDartEntrypointArgs().toArray());
+    assertArrayEquals(new String[] {}, fragment.getFlutterShellArgs().toArray());
+    assertFalse(fragment.shouldAttachEngineToActivity());
+    assertTrue(fragment.shouldHandleDeeplinking());
+    assertNull(fragment.getCachedEngineId());
+    assertTrue(fragment.shouldDestroyEngineWithHost());
+    assertEquals(RenderMode.texture, fragment.getRenderMode());
+    assertEquals(TransparencyMode.opaque, fragment.getTransparencyMode());
+  }
+
+  @Test
+  public void itCreatesNewEngineInGroupFragmentWithRequestedSettings() {
+    FlutterFragment fragment =
+        FlutterFragment.withNewEngineInGroup("my_cached_engine_group")
+            .dartEntrypoint("custom_entrypoint")
+            .initialRoute("/custom/route")
+            .shouldAttachEngineToActivity(false)
+            .handleDeeplinking(true)
+            .renderMode(RenderMode.texture)
+            .transparencyMode(TransparencyMode.opaque)
+            .build();
+
+    TestDelegateFactory delegateFactory =
+        new TestDelegateFactory(new FlutterActivityAndFragmentDelegate(fragment));
+
+    fragment.setDelegateFactory(delegateFactory);
+
+    assertEquals("my_cached_engine_group", fragment.getCachedEngineGroupId());
+    assertEquals("custom_entrypoint", fragment.getDartEntrypointFunctionName());
+    assertEquals("/custom/route", fragment.getInitialRoute());
     assertArrayEquals(new String[] {}, fragment.getFlutterShellArgs().toArray());
     assertFalse(fragment.shouldAttachEngineToActivity());
     assertTrue(fragment.shouldHandleDeeplinking());
@@ -254,8 +287,14 @@ public class FlutterFragmentTest {
     assertEquals(fragment.getExclusiveAppComponent(), delegate);
   }
 
+  @SuppressWarnings("deprecation")
+  private FragmentActivity getMockFragmentActivity() {
+    // TODO(reidbaker): https://github.com/flutter/flutter/issues/133151
+    return Robolectric.setupActivity(FragmentActivity.class);
+  }
+
   @Test
-  public void itDelegatesOnBackPressedAutomaticallyWhenEnabled() {
+  public void itDelegatesOnBackPressedWithSetFrameworkHandlesBack() {
     // We need to mock FlutterJNI to avoid triggering native code.
     FlutterJNI flutterJNI = mock(FlutterJNI.class);
     when(flutterJNI.isAttached()).thenReturn(true);
@@ -266,9 +305,11 @@ public class FlutterFragmentTest {
 
     FlutterFragment fragment =
         FlutterFragment.withCachedEngine("my_cached_engine")
+            // This enables the use of onBackPressedCallback, which is what
+            // sends backs to the framework if setFrameworkHandlesBack is true.
             .shouldAutomaticallyHandleOnBackPressed(true)
             .build();
-    FragmentActivity activity = Robolectric.setupActivity(FragmentActivity.class);
+    FragmentActivity activity = getMockFragmentActivity();
     activity
         .getSupportFragmentManager()
         .beginTransaction()
@@ -283,11 +324,21 @@ public class FlutterFragmentTest {
     TestDelegateFactory delegateFactory = new TestDelegateFactory(mockDelegate);
     fragment.setDelegateFactory(delegateFactory);
 
-    activity.onBackPressed();
+    // Calling onBackPressed now will still be handled by Android (the default),
+    // until setFrameworkHandlesBack is set to true.
+    activity.getOnBackPressedDispatcher().onBackPressed();
+    verify(mockDelegate, times(0)).onBackPressed();
 
+    // Setting setFrameworkHandlesBack to true means the delegate will receive
+    // the back and Android won't handle it.
+    fragment.setFrameworkHandlesBack(true);
+    activity.getOnBackPressedDispatcher().onBackPressed();
     verify(mockDelegate, times(1)).onBackPressed();
   }
 
+  @SuppressWarnings("deprecation")
+  // Robolectric.setupActivity
+  // TODO(reidbaker): https://github.com/flutter/flutter/issues/133151
   @Test
   public void itHandlesPopSystemNavigationAutomaticallyWhenEnabled() {
     // We need to mock FlutterJNI to avoid triggering native code.
@@ -302,7 +353,7 @@ public class FlutterFragmentTest {
         FlutterFragment.withCachedEngine("my_cached_engine")
             .shouldAutomaticallyHandleOnBackPressed(true)
             .build();
-    FragmentActivity activity = Robolectric.setupActivity(FragmentActivity.class);
+    FragmentActivity activity = getMockFragmentActivity();
     activity
         .getSupportFragmentManager()
         .beginTransaction()
@@ -323,10 +374,20 @@ public class FlutterFragmentTest {
     TestDelegateFactory delegateFactory = new TestDelegateFactory(mockDelegate);
     fragment.setDelegateFactory(delegateFactory);
 
+    assertTrue(callback.isEnabled());
+
     assertTrue(fragment.popSystemNavigator());
 
     verify(mockDelegate, never()).onBackPressed();
     assertTrue(onBackPressedCalled.get());
+    assertTrue(callback.isEnabled());
+
+    callback.setEnabled(false);
+    assertFalse(callback.isEnabled());
+    assertTrue(fragment.popSystemNavigator());
+
+    verify(mockDelegate, never()).onBackPressed();
+    assertFalse(callback.isEnabled());
   }
 
   @Test

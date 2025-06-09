@@ -167,9 +167,10 @@ static uint64_t GetLogicalKeyForEvent(NSEvent* event, uint64_t physicalKey) {
     uint32_t* keyLabel = DecodeUtf16(keyLabelUtf16, &keyLabelLength);
     if (keyLabelLength == 1) {
       uint32_t keyLabelChar = *keyLabel;
-      NSCAssert(!IsControlCharacter(keyLabelChar) && !IsUnprintableKey(keyLabelChar),
-                @"Unexpected control or unprintable keylabel 0x%x", keyLabelChar);
-      NSCAssert(keyLabelChar <= 0x10FFFF, @"Out of range keylabel 0x%x", keyLabelChar);
+      FML_DCHECK(!IsControlCharacter(keyLabelChar) && !IsUnprintableKey(keyLabelChar))
+          << "Unexpected control or unprintable keylabel 0x" << std::hex << keyLabelChar;
+      FML_DCHECK(keyLabelChar <= 0x10FFFF)
+          << "Out of range keylabel 0x" << std::hex << keyLabelChar;
       character = keyLabelChar;
     }
     delete[] keyLabel;
@@ -285,7 +286,7 @@ struct FlutterKeyPendingResponse {
  * Only set in debug mode. Nil in release mode, or if the callback has not been
  * handled.
  */
-@property(nonatomic) NSString* debugHandleSource;
+@property(nonatomic, copy) NSString* debugHandleSource;
 @end
 
 @implementation FlutterKeyCallbackGuard {
@@ -472,6 +473,7 @@ struct FlutterKeyPendingResponse {
 
 @implementation FlutterEmbedderKeyResponder
 
+// Synthesize properties declared in FlutterKeyPrimaryResponder protocol.
 @synthesize layoutMap;
 
 - (nonnull instancetype)initWithSendEvent:(FlutterSendEmbedderKeyEvent)sendEvent {
@@ -780,6 +782,22 @@ struct FlutterKeyPendingResponse {
   [_pendingResponses removeObjectForKey:@(responseId)];
 }
 
+- (void)syncModifiersIfNeeded:(NSEventModifierFlags)modifierFlags
+                    timestamp:(NSTimeInterval)timestamp {
+  FlutterAsyncKeyCallback replyCallback = ^(BOOL handled) {
+    // Do nothing.
+  };
+  FlutterKeyCallbackGuard* guardedCallback =
+      [[FlutterKeyCallbackGuard alloc] initWithCallback:replyCallback];
+  [self synchronizeModifiers:modifierFlags
+               ignoringFlags:0
+                   timestamp:timestamp
+                       guard:guardedCallback];
+}
+
+- (nonnull NSDictionary*)getPressedState {
+  return [NSDictionary dictionaryWithDictionary:_pressingRecords];
+}
 @end
 
 namespace {

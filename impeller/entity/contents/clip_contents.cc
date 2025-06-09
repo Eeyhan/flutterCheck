@@ -2,148 +2,189 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <cmath>
 #include <optional>
-#include "impeller/geometry/path_builder.h"
-#include "impeller/renderer/formats.h"
-#include "impeller/renderer/vertex_buffer_builder.h"
-#include "linear_gradient_contents.h"
 
+#include "fml/logging.h"
+#include "impeller/core/formats.h"
+#include "impeller/core/vertex_buffer.h"
 #include "impeller/entity/contents/clip_contents.h"
 #include "impeller/entity/contents/content_context.h"
-#include "impeller/entity/contents/solid_color_contents.h"
 #include "impeller/entity/entity.h"
 #include "impeller/renderer/render_pass.h"
+#include "impeller/renderer/vertex_buffer_builder.h"
 
 namespace impeller {
+
+static Scalar GetShaderClipDepth(uint32_t clip_depth) {
+  // Draw the clip at the max of the clip entity's depth slice, so that other
+  // draw calls with this same depth value will be culled even if they have a
+  // perspective transform.
+  return std::nextafterf(Entity::GetShaderClipDepth(clip_depth + 1), 0.0f);
+}
 
 /*******************************************************************************
  ******* ClipContents
  ******************************************************************************/
 
-ClipContents::ClipContents() = default;
+ClipContents::ClipContents(Rect coverage_rect, bool is_axis_aligned_rect)
+    : coverage_rect_(coverage_rect),
+      is_axis_aligned_rect_(is_axis_aligned_rect) {}
 
 ClipContents::~ClipContents() = default;
 
-void ClipContents::SetPath(Path path) {
-  path_ = std::move(path);
+void ClipContents::SetGeometry(GeometryResult clip_geometry) {
+  clip_geometry_ = std::move(clip_geometry);
 }
 
 void ClipContents::SetClipOperation(Entity::ClipOperation clip_op) {
   clip_op_ = clip_op;
 }
 
-std::optional<Rect> ClipContents::GetCoverage(const Entity& entity) const {
-  return path_.GetTransformedBoundingBox(entity.GetTransformation());
-};
+ClipCoverage ClipContents::GetClipCoverage(
+    const std::optional<Rect>& current_clip_coverage) const {
+  if (!current_clip_coverage.has_value()) {
+    return {.coverage = std::nullopt};
+  }
+  switch (clip_op_) {
+    case Entity::ClipOperation::kDifference:
+      // This can be optimized further by considering cases when the bounds of
+      // the current stencil will shrink.
+      return {
+          .is_difference_or_non_square = true,  //
+          .coverage = current_clip_coverage     //
+      };
+    case Entity::ClipOperation::kIntersect:
+      if (coverage_rect_.IsEmpty() || !current_clip_coverage.has_value()) {
+        return {.coverage = std::nullopt};
+      }
+      return {
+          .is_difference_or_non_square = !is_axis_aligned_rect_,            //
+          .coverage = current_clip_coverage->Intersection(coverage_rect_),  //
+      };
+  }
+  FML_UNREACHABLE();
+}
 
 bool ClipContents::Render(const ContentContext& renderer,
-                          const Entity& entity,
-                          RenderPass& pass) const {
+                          RenderPass& pass,
+                          uint32_t clip_depth) const {
+  if (!clip_geometry_.vertex_buffer) {
+    return true;
+  }
+
   using VS = ClipPipeline::VertexShader;
 
   VS::FrameInfo info;
-  // The color really doesn't matter.
-  info.color = Color::SkyBlue();
+  info.depth = GetShaderClipDepth(clip_depth);
 
-  Command cmd;
-  auto options = OptionsFromPassAndEntity(pass, entity);
-  cmd.stencil_reference = entity.GetStencilDepth();
-  options.stencil_compare = CompareFunction::kEqual;
-  options.stencil_operation = StencilOperation::kIncrementClamp;
+  auto options = OptionsFromPass(pass);
+  options.blend_mode = BlendMode::kDestination;
 
-  if (clip_op_ == Entity::ClipOperation::kDifference) {
-    {
-      cmd.label = "Difference Clip (Increment)";
+  pass.SetStencilReference(0);
 
-      cmd.primitive_type = PrimitiveType::kTriangleStrip;
-      auto points = Rect(Size(pass.GetRenderTargetSize())).GetPoints();
-      auto vertices =
-          VertexBufferBuilder<VS::PerVertexData>{}
-              .AddVertices({{points[0]}, {points[1]}, {points[2]}, {points[3]}})
-              .CreateVertexBuffer(pass.GetTransientsBuffer());
-      cmd.BindVertices(std::move(vertices));
+  /// Stencil preparation draw.
 
-      info.mvp = Matrix::MakeOrthographic(pass.GetRenderTargetSize());
-      VS::BindFrameInfo(cmd, pass.GetTransientsBuffer().EmplaceUniform(info));
+  options.depth_write_enabled = false;
+  options.primitive_type = clip_geometry_.type;
+  pass.SetVertexBuffer(clip_geometry_.vertex_buffer);
+  switch (clip_geometry_.mode) {
+    case GeometryResult::Mode::kNonZero:
+      pass.SetCommandLabel("Clip stencil preparation (NonZero)");
+      options.stencil_mode =
+          ContentContextOptions::StencilMode::kStencilNonZeroFill;
+      break;
+    case GeometryResult::Mode::kEvenOdd:
+      pass.SetCommandLabel("Clip stencil preparation (EvenOdd)");
+      options.stencil_mode =
+          ContentContextOptions::StencilMode::kStencilEvenOddFill;
+      break;
+    case GeometryResult::Mode::kNormal:
+    case GeometryResult::Mode::kPreventOverdraw:
+      pass.SetCommandLabel("Clip stencil preparation (Increment)");
+      options.stencil_mode =
+          ContentContextOptions::StencilMode::kOverdrawPreventionIncrement;
+      break;
+  }
+  pass.SetPipeline(renderer.GetClipPipeline(options));
 
-      cmd.pipeline = renderer.GetClipPipeline(options);
-      pass.AddCommand(cmd);
-    }
+  info.mvp = clip_geometry_.transform;
+  VS::BindFrameInfo(pass, renderer.GetTransientsBuffer().EmplaceUniform(info));
 
-    {
-      cmd.label = "Difference Clip (Punch)";
-
-      cmd.primitive_type = PrimitiveType::kTriangle;
-      cmd.stencil_reference = entity.GetStencilDepth() + 1;
-      options.stencil_compare = CompareFunction::kEqual;
-      options.stencil_operation = StencilOperation::kDecrementClamp;
-    }
-  } else {
-    cmd.label = "Intersect Clip";
-    options.stencil_compare = CompareFunction::kEqual;
-    options.stencil_operation = StencilOperation::kIncrementClamp;
+  if (!pass.Draw().ok()) {
+    return false;
   }
 
-  cmd.pipeline = renderer.GetClipPipeline(options);
-  cmd.BindVertices(SolidColorContents::CreateSolidFillVertices(
-      path_, pass.GetTransientsBuffer()));
+  /// Write depth.
 
-  info.mvp = Matrix::MakeOrthographic(pass.GetRenderTargetSize()) *
-             entity.GetTransformation();
-  VS::BindFrameInfo(cmd, pass.GetTransientsBuffer().EmplaceUniform(info));
+  options.depth_write_enabled = true;
+  options.primitive_type = PrimitiveType::kTriangleStrip;
+  Rect cover_area;
+  switch (clip_op_) {
+    case Entity::ClipOperation::kIntersect:
+      pass.SetCommandLabel("Intersect Clip");
+      options.stencil_mode =
+          ContentContextOptions::StencilMode::kCoverCompareInverted;
+      cover_area = Rect::MakeSize(pass.GetRenderTargetSize());
+      break;
+    case Entity::ClipOperation::kDifference:
+      pass.SetCommandLabel("Difference Clip");
+      options.stencil_mode = ContentContextOptions::StencilMode::kCoverCompare;
+      cover_area = coverage_rect_;
+      break;
+  }
+  auto points = cover_area.GetPoints();
+  pass.SetVertexBuffer(
+      CreateVertexBuffer(points, renderer.GetTransientsBuffer()));
 
-  pass.AddCommand(std::move(cmd));
-  return true;
+  pass.SetPipeline(renderer.GetClipPipeline(options));
+
+  info.mvp = pass.GetOrthographicTransform();
+  VS::BindFrameInfo(pass, renderer.GetTransientsBuffer().EmplaceUniform(info));
+
+  return pass.Draw().ok();
 }
 
 /*******************************************************************************
  ******* ClipRestoreContents
  ******************************************************************************/
 
-ClipRestoreContents::ClipRestoreContents() = default;
-
-ClipRestoreContents::~ClipRestoreContents() = default;
-
-std::optional<Rect> ClipRestoreContents::GetCoverage(
-    const Entity& entity) const {
-  return std::nullopt;
-};
-
-bool ClipRestoreContents::Render(const ContentContext& renderer,
-                                 const Entity& entity,
-                                 RenderPass& pass) const {
+bool RenderClipRestore(const ContentContext& renderer,
+                       RenderPass& pass,
+                       uint32_t clip_depth,
+                       std::optional<Rect> restore_coverage) {
   using VS = ClipPipeline::VertexShader;
 
-  Command cmd;
-  cmd.label = "Restore Clip";
-  auto options = OptionsFromPassAndEntity(pass, entity);
-  options.stencil_compare = CompareFunction::kLess;
-  options.stencil_operation = StencilOperation::kSetToReferenceValue;
-  cmd.pipeline = renderer.GetClipPipeline(options);
-  cmd.stencil_reference = entity.GetStencilDepth();
+  pass.SetCommandLabel("Restore Clip");
+  auto options = OptionsFromPass(pass);
+  options.blend_mode = BlendMode::kDestination;
+  options.stencil_mode =
+      ContentContextOptions::StencilMode::kOverdrawPreventionRestore;
+  options.primitive_type = PrimitiveType::kTriangleStrip;
+  pass.SetPipeline(renderer.GetClipPipeline(options));
+  pass.SetStencilReference(0);
 
-  // Create a rect that covers the whole render target.
-  auto size = pass.GetRenderTargetSize();
-  VertexBufferBuilder<VS::PerVertexData> vtx_builder;
-  vtx_builder.AddVertices({
-      {Point(0.0, 0.0)},
-      {Point(size.width, 0.0)},
-      {Point(size.width, size.height)},
-      {Point(0.0, 0.0)},
-      {Point(size.width, size.height)},
-      {Point(0.0, size.height)},
-  });
-  cmd.BindVertices(vtx_builder.CreateVertexBuffer(pass.GetTransientsBuffer()));
+  // Create a rect that covers either the given restore area, or the whole
+  // render target texture.
+  auto ltrb =
+      restore_coverage.value_or(Rect::MakeSize(pass.GetRenderTargetSize()))
+          .GetLTRB();
+
+  std::array<VS::PerVertexData, 4> vertices = {
+      VS::PerVertexData{Point(ltrb[0], ltrb[1])},
+      VS::PerVertexData{Point(ltrb[2], ltrb[1])},
+      VS::PerVertexData{Point(ltrb[0], ltrb[3])},
+      VS::PerVertexData{Point(ltrb[2], ltrb[3])},
+  };
+  pass.SetVertexBuffer(
+      CreateVertexBuffer(vertices, renderer.GetTransientsBuffer()));
 
   VS::FrameInfo info;
-  // The color really doesn't matter.
-  info.color = Color::SkyBlue();
-  info.mvp = Matrix::MakeOrthographic(pass.GetRenderTargetSize());
+  info.depth = GetShaderClipDepth(clip_depth);
+  info.mvp = pass.GetOrthographicTransform();
+  VS::BindFrameInfo(pass, renderer.GetTransientsBuffer().EmplaceUniform(info));
 
-  VS::BindFrameInfo(cmd, pass.GetTransientsBuffer().EmplaceUniform(info));
-
-  pass.AddCommand(std::move(cmd));
-  return true;
+  return pass.Draw().ok();
 }
 
-};  // namespace impeller
+}  // namespace impeller

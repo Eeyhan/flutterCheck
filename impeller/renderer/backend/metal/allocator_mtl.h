@@ -2,14 +2,37 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#pragma once
+#ifndef FLUTTER_IMPELLER_RENDERER_BACKEND_METAL_ALLOCATOR_MTL_H_
+#define FLUTTER_IMPELLER_RENDERER_BACKEND_METAL_ALLOCATOR_MTL_H_
 
 #include <Metal/Metal.h>
+#include <atomic>
 
-#include "flutter/fml/macros.h"
-#include "impeller/renderer/allocator.h"
+#include "impeller/base/thread.h"
+#include "impeller/core/allocator.h"
 
 namespace impeller {
+
+class DebugAllocatorStats {
+ public:
+  DebugAllocatorStats() {}
+
+  ~DebugAllocatorStats() {}
+
+  /// Increment the tracked allocation size in bytes.
+  void Increment(size_t size);
+
+  /// Decrement the tracked allocation size in bytes.
+  void Decrement(size_t size);
+
+  /// Get the current tracked allocation size.
+  Bytes GetAllocationSize();
+
+ private:
+  std::atomic<size_t> size_ = 0;
+};
+
+ISize DeviceMaxTextureSizeSupported(id<MTLDevice> device);
 
 class AllocatorMTL final : public Allocator {
  public:
@@ -18,15 +41,24 @@ class AllocatorMTL final : public Allocator {
   // |Allocator|
   ~AllocatorMTL() override;
 
+  // |Allocator|
+  Bytes DebugGetHeapUsage() const override;
+
  private:
   friend class ContextMTL;
 
-  // In the prototype, we are going to be allocating resources directly with the
-  // MTLDevice APIs. But, in the future, this could be backed by named heaps
-  // with specific limits.
   id<MTLDevice> device_;
   std::string allocator_label_;
+  bool supports_memoryless_targets_ = false;
+  bool supports_uma_ = false;
   bool is_valid_ = false;
+
+#ifdef IMPELLER_DEBUG
+  std::shared_ptr<DebugAllocatorStats> debug_allocater_ =
+      std::make_shared<DebugAllocatorStats>();
+#endif  // IMPELLER_DEBUG
+
+  ISize max_texture_supported_;
 
   AllocatorMTL(id<MTLDevice> device, std::string label);
 
@@ -34,15 +66,27 @@ class AllocatorMTL final : public Allocator {
   bool IsValid() const;
 
   // |Allocator|
-  std::shared_ptr<DeviceBuffer> CreateBuffer(StorageMode mode,
-                                             size_t length) override;
+  std::shared_ptr<DeviceBuffer> OnCreateBuffer(
+      const DeviceBufferDescriptor& desc) override;
 
   // |Allocator|
-  std::shared_ptr<Texture> CreateTexture(
-      StorageMode mode,
+  std::shared_ptr<Texture> OnCreateTexture(
       const TextureDescriptor& desc) override;
 
-  FML_DISALLOW_COPY_AND_ASSIGN(AllocatorMTL);
+  // |Allocator|
+  uint16_t MinimumBytesPerRow(PixelFormat format) const override;
+
+  // |Allocator|
+  ISize GetMaxTextureSizeSupported() const override;
+
+  // |Allocator|
+  void DebugTraceMemoryStatistics() const override;
+
+  AllocatorMTL(const AllocatorMTL&) = delete;
+
+  AllocatorMTL& operator=(const AllocatorMTL&) = delete;
 };
 
 }  // namespace impeller
+
+#endif  // FLUTTER_IMPELLER_RENDERER_BACKEND_METAL_ALLOCATOR_MTL_H_

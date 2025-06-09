@@ -14,7 +14,6 @@
 #include "dart-pkg/zircon/sdk_ext/handle.h"
 #include "dart-pkg/zircon/sdk_ext/natives.h"
 #include "dart-pkg/zircon/sdk_ext/system.h"
-#include "flutter/fml/size.h"
 #include "third_party/dart/runtime/include/dart_api.h"
 #include "third_party/tonic/dart_binding_macros.h"
 #include "third_party/tonic/dart_class_library.h"
@@ -63,7 +62,7 @@ Dart_NativeFunction NativeLookup(Dart_Handle name,
   FML_DCHECK(function_name != nullptr);
   FML_DCHECK(auto_setup_scope != nullptr);
   *auto_setup_scope = true;
-  size_t num_entries = fml::size(Entries);
+  size_t num_entries = std::size(Entries);
   for (size_t i = 0; i < num_entries; ++i) {
     const struct NativeEntries& entry = Entries[i];
     if (!strcmp(function_name, entry.name) &&
@@ -77,7 +76,7 @@ Dart_NativeFunction NativeLookup(Dart_Handle name,
 }
 
 const uint8_t* NativeSymbol(Dart_NativeFunction native_function) {
-  size_t num_entries = fml::size(Entries);
+  size_t num_entries = std::size(Entries);
   for (size_t i = 0; i < num_entries; ++i) {
     const struct NativeEntries& entry = Entries[i];
     if (entry.function == native_function) {
@@ -100,8 +99,7 @@ void SetReturnCode(Dart_NativeArguments arguments) {
 
 }  // namespace
 
-void Initialize(fidl::InterfaceHandle<fuchsia::sys::Environment> environment,
-                zx::channel directory_request,
+void Initialize(zx::channel directory_request,
                 std::optional<zx::eventpair> view_ref) {
   zircon::dart::Initialize();
 
@@ -116,14 +114,6 @@ void Initialize(fidl::InterfaceHandle<fuchsia::sys::Environment> environment,
       new tonic::DartClassProvider(dart_state, "dart:fuchsia"));
   dart_state->class_library().add_provider("fuchsia",
                                            std::move(fuchsia_class_provider));
-
-  // V2 components do not use the environment.
-  if (environment) {
-    result = Dart_SetField(
-        library, ToDart("_environment"),
-        ToDart(zircon::dart::Handle::Create(environment.TakeChannel())));
-    FML_CHECK(!tonic::CheckAndHandleError(result));
-  }
 
   if (directory_request) {
     result = Dart_SetField(

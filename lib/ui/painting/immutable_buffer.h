@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef FLUTTER_LIB_UI_PAINTNIG_IMMUTABLE_BUFER_H_
-#define FLUTTER_LIB_UI_PAINTNIG_IMMUTABLE_BUFER_H_
+#ifndef FLUTTER_LIB_UI_PAINTING_IMMUTABLE_BUFFER_H_
+#define FLUTTER_LIB_UI_PAINTING_IMMUTABLE_BUFFER_H_
 
 #include <cstdint>
 
@@ -30,14 +30,16 @@ class ImmutableBuffer : public RefCountedDartWrappable<ImmutableBuffer> {
 
   /// Initializes a new ImmutableData from a Dart Uint8List.
   ///
-  /// The zero indexed argument is the caller that will be registered as the
-  /// Dart peer of the native ImmutableBuffer object.
+  /// `buffer_handle` is the caller that will be registered as the Dart peer of
+  /// the native ImmutableBuffer object.
   ///
-  /// The first indexed argumented is a tonic::Uint8List of bytes to copy.
+  /// `data` is a tonic::Uint8List of bytes to copy.
   ///
-  /// The second indexed argument is expected to be a void callback to signal
-  /// when the copy has completed.
-  static void init(Dart_NativeArguments args);
+  /// `callback_handle` is expected to be a void callback to signal when the
+  /// copy has completed.
+  static Dart_Handle init(Dart_Handle buffer_handle,
+                          Dart_Handle data,
+                          Dart_Handle callback_handle);
 
   /// Initializes a new ImmutableData from an asset matching a provided
   /// asset string.
@@ -50,7 +52,23 @@ class ImmutableBuffer : public RefCountedDartWrappable<ImmutableBuffer> {
   ///
   /// The second indexed argument is expected to be a void callback to signal
   /// when the copy has completed.
-  static void initFromAsset(Dart_NativeArguments args);
+  static Dart_Handle initFromAsset(Dart_Handle buffer_handle,
+                                   Dart_Handle asset_name_handle,
+                                   Dart_Handle callback_handle);
+
+  /// Initializes a new ImmutableData from an File path.
+  ///
+  /// The zero indexed argument is the caller that will be registered as the
+  /// Dart peer of the native ImmutableBuffer object.
+  ///
+  /// The first indexed argumented is a String corresponding to the file path
+  /// to load.
+  ///
+  /// The second indexed argument is expected to be a void callback to signal
+  /// when the copy has completed.
+  static Dart_Handle initFromFile(Dart_Handle buffer_handle,
+                                  Dart_Handle file_path_handle,
+                                  Dart_Handle callback_handle);
 
   /// The length of the data in bytes.
   size_t length() const {
@@ -71,10 +89,6 @@ class ImmutableBuffer : public RefCountedDartWrappable<ImmutableBuffer> {
     ClearDartWrapper();
   }
 
-  size_t GetAllocationSize() const override;
-
-  static void RegisterNatives(tonic::DartLibraryNatives* natives);
-
  private:
   explicit ImmutableBuffer(sk_sp<SkData> data) : data_(std::move(data)) {}
 
@@ -89,4 +103,4 @@ class ImmutableBuffer : public RefCountedDartWrappable<ImmutableBuffer> {
 
 }  // namespace flutter
 
-#endif  // FLUTTER_LIB_UI_PAINTNIG_IMMUTABLE_BUFER_H_
+#endif  // FLUTTER_LIB_UI_PAINTING_IMMUTABLE_BUFFER_H_

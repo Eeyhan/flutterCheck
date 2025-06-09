@@ -6,6 +6,8 @@
 
 #include <vector>
 
+#include "impeller/tessellator/tessellator_libtess.h"
+
 namespace impeller {
 PathBuilder* CreatePathBuilder() {
   return new PathBuilder();
@@ -39,19 +41,25 @@ void Close(PathBuilder* builder) {
 
 struct Vertices* Tessellate(PathBuilder* builder,
                             int fill_type,
-                            Scalar scale,
-                            Scalar angle_tolerance,
-                            Scalar cusp_limit) {
+                            Scalar tolerance) {
   auto path = builder->CopyPath(static_cast<FillType>(fill_type));
-  auto smoothing = SmoothingApproximation(scale, angle_tolerance, cusp_limit);
-  auto polyline = path.CreatePolyline(smoothing);
-
   std::vector<float> points;
-  if (Tessellator{}.Tessellate(path.GetFillType(), polyline,
-                               [&points](Point vertex) {
-                                 points.push_back(vertex.x);
-                                 points.push_back(vertex.y);
-                               }) != Tessellator::Result::kSuccess) {
+  if (TessellatorLibtess{}.Tessellate(
+          path, tolerance,
+          [&points](const float* vertices, size_t vertices_count,
+                    const uint16_t* indices, size_t indices_count) {
+            // Results are expected to be re-duplicated.
+            std::vector<Point> raw_points;
+            for (auto i = 0u; i < vertices_count * 2; i += 2) {
+              raw_points.emplace_back(Point{vertices[i], vertices[i + 1]});
+            }
+            for (auto i = 0u; i < indices_count; i++) {
+              auto point = raw_points[indices[i]];
+              points.push_back(point.x);
+              points.push_back(point.y);
+            }
+            return true;
+          }) != TessellatorLibtess::Result::kSuccess) {
     return nullptr;
   }
 

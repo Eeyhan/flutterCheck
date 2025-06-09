@@ -2,21 +2,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#pragma once
+#ifndef FLUTTER_IMPELLER_ENTITY_CONTENTS_TEXT_CONTENTS_H_
+#define FLUTTER_IMPELLER_ENTITY_CONTENTS_TEXT_CONTENTS_H_
 
-#include <functional>
 #include <memory>
-#include <variant>
-#include <vector>
 
-#include "flutter/fml/macros.h"
 #include "impeller/entity/contents/contents.h"
 #include "impeller/geometry/color.h"
+#include "impeller/typographer/font_glyph_pair.h"
 #include "impeller/typographer/text_frame.h"
 
 namespace impeller {
 
-class GlyphAtlas;
 class LazyGlyphAtlas;
 class Context;
 
@@ -26,16 +23,38 @@ class TextContents final : public Contents {
 
   ~TextContents();
 
-  void SetTextFrame(TextFrame frame);
-
-  void SetGlyphAtlas(std::shared_ptr<GlyphAtlas> atlas);
-
-  void SetGlyphAtlas(std::shared_ptr<LazyGlyphAtlas> atlas);
+  void SetTextFrame(const std::shared_ptr<TextFrame>& frame);
 
   void SetColor(Color color);
 
+  /// @brief Force the text color to apply to the rendered glyphs, even if those
+  ///        glyphs are bitmaps.
+  ///
+  ///        This is used to ensure that mask blurs work correctly on emoji.
+  void SetForceTextColor(bool value);
+
+  /// Must be set after text frame.
+  void SetTextProperties(Color color,
+                         bool stroke,
+                         Scalar stroke_width,
+                         Cap stroke_cap,
+                         Join stroke_join,
+                         Scalar stroke_miter);
+
+  Color GetColor() const;
+
+  // |Contents|
+  void SetInheritedOpacity(Scalar opacity) override;
+
+  // The offset is only used for computing the subpixel glyph position.
+  void SetOffset(Vector2 offset);
+
+  std::optional<Rect> GetTextFrameBounds() const;
+
   // |Contents|
   std::optional<Rect> GetCoverage(const Entity& entity) const override;
+
+  void SetScale(Scalar scale) { scale_ = scale; }
 
   // |Contents|
   bool Render(const ContentContext& renderer,
@@ -43,16 +62,21 @@ class TextContents final : public Contents {
               RenderPass& pass) const override;
 
  private:
-  TextFrame frame_;
+  std::optional<GlyphProperties> GetGlyphProperties() const;
+
+  std::shared_ptr<TextFrame> frame_;
+  Scalar scale_ = 1.0;
+  Scalar inherited_opacity_ = 1.0;
+  Vector2 offset_;
+  bool force_text_color_ = false;
   Color color_;
-  mutable std::variant<std::shared_ptr<GlyphAtlas>,
-                       std::shared_ptr<LazyGlyphAtlas>>
-      atlas_;
+  GlyphProperties properties_;
 
-  std::shared_ptr<GlyphAtlas> ResolveAtlas(
-      std::shared_ptr<Context> context) const;
+  TextContents(const TextContents&) = delete;
 
-  FML_DISALLOW_COPY_AND_ASSIGN(TextContents);
+  TextContents& operator=(const TextContents&) = delete;
 };
 
 }  // namespace impeller
+
+#endif  // FLUTTER_IMPELLER_ENTITY_CONTENTS_TEXT_CONTENTS_H_

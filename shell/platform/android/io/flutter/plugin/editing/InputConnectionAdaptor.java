@@ -4,9 +4,13 @@
 
 package io.flutter.plugin.editing;
 
+import static io.flutter.Build.API_LEVELS;
+
+import android.annotation.TargetApi;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.text.DynamicLayout;
@@ -22,11 +26,21 @@ import android.view.inputmethod.CursorAnchorInfo;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.ExtractedText;
 import android.view.inputmethod.ExtractedTextRequest;
+import android.view.inputmethod.InputContentInfo;
 import android.view.inputmethod.InputMethodManager;
 import androidx.annotation.NonNull;
+import androidx.annotation.RequiresApi;
+import androidx.core.view.inputmethod.InputConnectionCompat;
 import io.flutter.Log;
 import io.flutter.embedding.engine.FlutterJNI;
+import io.flutter.embedding.engine.systemchannels.ScribeChannel;
 import io.flutter.embedding.engine.systemchannels.TextInputChannel;
+import java.io.ByteArrayOutputStream;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.HashMap;
+import java.util.Map;
 
 public class InputConnectionAdaptor extends BaseInputConnection
     implements ListenableEditingState.EditingStateWatcher {
@@ -38,6 +52,7 @@ public class InputConnectionAdaptor extends BaseInputConnection
 
   private final View mFlutterView;
   private final int mClient;
+  private final ScribeChannel scribeChannel;
   private final TextInputChannel textInputChannel;
   private final ListenableEditingState mEditable;
   private final EditorInfo mEditorInfo;
@@ -56,6 +71,7 @@ public class InputConnectionAdaptor extends BaseInputConnection
       View view,
       int client,
       TextInputChannel textInputChannel,
+      ScribeChannel scribeChannel,
       KeyboardDelegate keyboardDelegate,
       ListenableEditingState editable,
       EditorInfo editorInfo,
@@ -64,6 +80,7 @@ public class InputConnectionAdaptor extends BaseInputConnection
     mFlutterView = view;
     mClient = client;
     this.textInputChannel = textInputChannel;
+    this.scribeChannel = scribeChannel;
     mEditable = editable;
     mEditable.addEditingStateListener(this);
     mEditorInfo = editorInfo;
@@ -87,10 +104,19 @@ public class InputConnectionAdaptor extends BaseInputConnection
       View view,
       int client,
       TextInputChannel textInputChannel,
+      ScribeChannel scribeChannel,
       KeyboardDelegate keyboardDelegate,
       ListenableEditingState editable,
       EditorInfo editorInfo) {
-    this(view, client, textInputChannel, keyboardDelegate, editable, editorInfo, new FlutterJNI());
+    this(
+        view,
+        client,
+        textInputChannel,
+        scribeChannel,
+        keyboardDelegate,
+        editable,
+        editorInfo,
+        new FlutterJNI());
   }
 
   private ExtractedText getExtractedText(ExtractedTextRequest request) {
@@ -107,9 +133,6 @@ public class InputConnectionAdaptor extends BaseInputConnection
   }
 
   private CursorAnchorInfo getCursorAnchorInfo() {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
-      return null;
-    }
     if (mCursorAnchorInfoBuilder == null) {
       mCursorAnchorInfoBuilder = new CursorAnchorInfo.Builder();
     } else {
@@ -215,9 +238,6 @@ public class InputConnectionAdaptor extends BaseInputConnection
 
   @Override
   public boolean requestCursorUpdates(int cursorUpdateMode) {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
-      return false;
-    }
     if ((cursorUpdateMode & CURSOR_UPDATE_IMMEDIATE) != 0) {
       mImm.updateCursorAnchorInfo(mFlutterView, getCursorAnchorInfo());
     }
@@ -254,6 +274,10 @@ public class InputConnectionAdaptor extends BaseInputConnection
     endBatchEdit();
     return result;
   }
+
+  // TODO(justinmc): Scribe stylus gestures should be supported here via
+  // performHandwritingGesture.
+  // https://github.com/flutter/flutter/issues/156018
 
   // Sanitizes the index to ensure the index is within the range of the
   // contents of editable.
@@ -314,13 +338,6 @@ public class InputConnectionAdaptor extends BaseInputConnection
         endBatchEdit();
         return true;
       }
-    }
-    if (event.getAction() == KeyEvent.ACTION_UP
-        && (event.getKeyCode() == KeyEvent.KEYCODE_SHIFT_LEFT
-            || event.getKeyCode() == KeyEvent.KEYCODE_SHIFT_RIGHT)) {
-      int selEnd = Selection.getSelectionEnd(mEditable);
-      setSelection(selEnd, selEnd);
-      return true;
     }
     return false;
   }
@@ -477,6 +494,75 @@ public class InputConnectionAdaptor extends BaseInputConnection
     return true;
   }
 
+  @Override
+  @TargetApi(API_LEVELS.API_25)
+  @RequiresApi(API_LEVELS.API_25)
+  public boolean commitContent(InputContentInfo inputContentInfo, int flags, Bundle opts) {
+    // Ensure permission is granted.
+    if (Build.VERSION.SDK_INT >= API_LEVELS.API_25
+        && (flags & InputConnectionCompat.INPUT_CONTENT_GRANT_READ_URI_PERMISSION) != 0) {
+      try {
+        inputContentInfo.requestPermission();
+      } catch (Exception e) {
+        return false;
+      }
+    } else {
+      return false;
+    }
+
+    if (inputContentInfo.getDescription().getMimeTypeCount() > 0) {
+      inputContentInfo.requestPermission();
+
+      final Uri uri = inputContentInfo.getContentUri();
+      final String mimeType = inputContentInfo.getDescription().getMimeType(0);
+      Context context = mFlutterView.getContext();
+
+      if (uri != null) {
+        InputStream is;
+        try {
+          // Extract byte data from the given URI.
+          is = context.getContentResolver().openInputStream(uri);
+        } catch (FileNotFoundException ex) {
+          inputContentInfo.releasePermission();
+          return false;
+        }
+
+        if (is != null) {
+          final byte[] data = this.readStreamFully(is, 64 * 1024);
+
+          final Map<String, Object> obj = new HashMap<>();
+          obj.put("mimeType", mimeType);
+          obj.put("data", data);
+          obj.put("uri", uri.toString());
+
+          // Commit the content to the text input channel and release the permission.
+          textInputChannel.commitContent(mClient, obj);
+          inputContentInfo.releasePermission();
+          return true;
+        }
+      }
+
+      inputContentInfo.releasePermission();
+    }
+    return false;
+  }
+
+  private byte[] readStreamFully(InputStream is, int blocksize) {
+    ByteArrayOutputStream baos = new ByteArrayOutputStream();
+
+    byte[] buffer = new byte[blocksize];
+    while (true) {
+      int len = -1;
+      try {
+        len = is.read(buffer);
+      } catch (IOException ex) {
+      }
+      if (len == -1) break;
+      baos.write(buffer, 0, len);
+    }
+    return baos.toByteArray();
+  }
+
   // -------- Start: ListenableEditingState watcher implementation -------
   @Override
   public void didChangeEditingState(
@@ -496,9 +582,6 @@ public class InputConnectionAdaptor extends BaseInputConnection
         mEditable.getComposingStart(),
         mEditable.getComposingEnd());
 
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
-      return;
-    }
     if (mExtractRequest != null) {
       mImm.updateExtractedText(
           mFlutterView, mExtractRequest.token, getExtractedText(mExtractRequest));

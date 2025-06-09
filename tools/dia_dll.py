@@ -18,9 +18,7 @@ import sys
 
 # Path constants. (All of these should be absolute paths.)
 THIS_DIR = os.path.abspath(os.path.dirname(__file__))
-LLVM_BUILD_DIR = os.path.abspath(
-    os.path.join(THIS_DIR, '..', '..', 'buildtools', 'windows-x64', 'clang')
-)
+LLVM_BUILD_DIR = os.path.abspath(os.path.join(THIS_DIR, '..', 'buildtools', 'windows-x64', 'clang'))
 
 
 def GetDiaDll():
@@ -44,7 +42,12 @@ def GetDiaDll():
   msvs_version = vs_toolchain.GetVisualStudioVersion()
 
   if bool(int(os.environ.get('DEPOT_TOOLS_WIN_TOOLCHAIN', '1'))):
-    dia_path = os.path.join(win_sdk_dir, '..', 'DIA SDK', 'bin', 'amd64')
+    # Depot tools .zip layout:
+    # \- DIA SDK
+    # \- Windows Kits
+    #   \- 10
+    #     \- ... # Location of `DEPOT_TOOLS_WIN_TOOLCHAIN`
+    dia_path = os.path.join(win_sdk_dir, '..', '..', 'DIA SDK', 'bin', 'amd64')
   else:
     if 'GYP_MSVS_OVERRIDE_PATH' in os.environ:
       vs_path = os.environ['GYP_MSVS_OVERRIDE_PATH']

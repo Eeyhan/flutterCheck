@@ -30,6 +30,8 @@
 namespace flutter {
 namespace {
 
+const double kTextHeightNone = 0.0;
+
 // TextStyle
 
 const int kTSLeadingDistributionIndex = 0;
@@ -141,40 +143,22 @@ const int kSForceStrutHeightMask = 1 << kSForceStrutHeightIndex;
 
 }  // namespace
 
-static void ParagraphBuilder_constructor(Dart_NativeArguments args) {
-  UIDartState::ThrowIfUIOperationsProhibited();
-  DartCallConstructor(&ParagraphBuilder::create, args);
-}
-
 IMPLEMENT_WRAPPERTYPEINFO(ui, ParagraphBuilder);
 
-#define FOR_EACH_BINDING(V)           \
-  V(ParagraphBuilder, pushStyle)      \
-  V(ParagraphBuilder, pop)            \
-  V(ParagraphBuilder, addText)        \
-  V(ParagraphBuilder, addPlaceholder) \
-  V(ParagraphBuilder, build)
-
-FOR_EACH_BINDING(DART_NATIVE_CALLBACK)
-
-void ParagraphBuilder::RegisterNatives(tonic::DartLibraryNatives* natives) {
-  natives->Register(
-      {{"ParagraphBuilder_constructor", ParagraphBuilder_constructor, 9, true},
-       FOR_EACH_BINDING(DART_REGISTER_NATIVE)});
-}
-
-fml::RefPtr<ParagraphBuilder> ParagraphBuilder::create(
-    tonic::Int32List& encoded,
-    Dart_Handle strutData,
-    const std::string& fontFamily,
-    const std::vector<std::string>& strutFontFamilies,
-    double fontSize,
-    double height,
-    const std::u16string& ellipsis,
-    const std::string& locale) {
-  return fml::MakeRefCounted<ParagraphBuilder>(encoded, strutData, fontFamily,
-                                               strutFontFamilies, fontSize,
-                                               height, ellipsis, locale);
+void ParagraphBuilder::Create(Dart_Handle wrapper,
+                              Dart_Handle encoded_handle,
+                              Dart_Handle strutData,
+                              const std::string& fontFamily,
+                              const std::vector<std::string>& strutFontFamilies,
+                              double fontSize,
+                              double height,
+                              const std::u16string& ellipsis,
+                              const std::string& locale) {
+  UIDartState::ThrowIfUIOperationsProhibited();
+  auto res = fml::MakeRefCounted<ParagraphBuilder>(
+      encoded_handle, strutData, fontFamily, strutFontFamilies, fontSize,
+      height, ellipsis, locale);
+  res->AssociateWithDartWrapper(wrapper);
 }
 
 // returns true if there is a font family defined. Font family is the only
@@ -241,7 +225,7 @@ void decodeStrut(Dart_Handle strut_data,
 }
 
 ParagraphBuilder::ParagraphBuilder(
-    tonic::Int32List& encoded,
+    Dart_Handle encoded_data,
     Dart_Handle strutData,
     const std::string& fontFamily,
     const std::vector<std::string>& strutFontFamilies,
@@ -249,50 +233,57 @@ ParagraphBuilder::ParagraphBuilder(
     double height,
     const std::u16string& ellipsis,
     const std::string& locale) {
-  int32_t mask = encoded[0];
+  int32_t mask = 0;
   txt::ParagraphStyle style;
+  {
+    tonic::Int32List encoded(encoded_data);
 
-  if (mask & kPSTextAlignMask) {
-    style.text_align = static_cast<txt::TextAlign>(encoded[kPSTextAlignIndex]);
-  }
+    mask = encoded[0];
 
-  if (mask & kPSTextDirectionMask) {
-    style.text_direction =
-        static_cast<txt::TextDirection>(encoded[kPSTextDirectionIndex]);
-  }
+    if (mask & kPSTextAlignMask) {
+      style.text_align =
+          static_cast<txt::TextAlign>(encoded[kPSTextAlignIndex]);
+    }
 
-  if (mask & kPSFontWeightMask) {
-    style.font_weight =
-        static_cast<txt::FontWeight>(encoded[kPSFontWeightIndex]);
-  }
+    if (mask & kPSTextDirectionMask) {
+      style.text_direction =
+          static_cast<txt::TextDirection>(encoded[kPSTextDirectionIndex]);
+    }
 
-  if (mask & kPSFontStyleMask) {
-    style.font_style = static_cast<txt::FontStyle>(encoded[kPSFontStyleIndex]);
-  }
+    if (mask & kPSFontWeightMask) {
+      style.font_weight =
+          static_cast<txt::FontWeight>(encoded[kPSFontWeightIndex]);
+    }
 
-  if (mask & kPSFontFamilyMask) {
-    style.font_family = fontFamily;
-  }
+    if (mask & kPSFontStyleMask) {
+      style.font_style =
+          static_cast<txt::FontStyle>(encoded[kPSFontStyleIndex]);
+    }
 
-  if (mask & kPSFontSizeMask) {
-    style.font_size = fontSize;
-  }
+    if (mask & kPSFontFamilyMask) {
+      style.font_family = fontFamily;
+    }
 
-  if (mask & kPSHeightMask) {
-    style.height = height;
-    style.has_height_override = true;
-  }
+    if (mask & kPSFontSizeMask) {
+      style.font_size = fontSize;
+    }
 
-  if (mask & kPSTextHeightBehaviorMask) {
-    style.text_height_behavior = encoded[kPSTextHeightBehaviorIndex];
+    if (mask & kPSHeightMask) {
+      style.height = height;
+      style.has_height_override = true;
+    }
+
+    if (mask & kPSTextHeightBehaviorMask) {
+      style.text_height_behavior = encoded[kPSTextHeightBehaviorIndex];
+    }
+
+    if (mask & kPSMaxLinesMask) {
+      style.max_lines = encoded[kPSMaxLinesIndex];
+    }
   }
 
   if (mask & kPSStrutStyleMask) {
     decodeStrut(strutData, strutFontFamilies, style);
-  }
-
-  if (mask & kPSMaxLinesMask) {
-    style.max_lines = encoded[kPSMaxLinesIndex];
   }
 
   if (mask & kPSEllipsisMask) {
@@ -308,23 +299,9 @@ ParagraphBuilder::ParagraphBuilder(
                                         ->client()
                                         ->GetFontCollection();
 
-  typedef std::unique_ptr<txt::ParagraphBuilder> (*ParagraphBuilderFactory)(
-      const txt::ParagraphStyle& style,
-      std::shared_ptr<txt::FontCollection> font_collection);
-  ParagraphBuilderFactory factory = txt::ParagraphBuilder::CreateTxtBuilder;
-
-#if FLUTTER_ENABLE_SKSHAPER
-#if FLUTTER_ALWAYS_USE_SKSHAPER
-  bool enable_skparagraph = true;
-#else
-  bool enable_skparagraph = UIDartState::Current()->enable_skparagraph();
-#endif
-  if (enable_skparagraph) {
-    factory = txt::ParagraphBuilder::CreateSkiaBuilder;
-  }
-#endif  // FLUTTER_ENABLE_SKSHAPER
-
-  m_paragraphBuilder = factory(style, font_collection.GetFontCollection());
+  auto impeller_enabled = UIDartState::Current()->IsImpellerEnabled();
+  m_paragraph_builder_ = txt::ParagraphBuilder::CreateSkiaBuilder(
+      style, font_collection.GetFontCollection(), impeller_enabled);
 }
 
 ParagraphBuilder::~ParagraphBuilder() = default;
@@ -390,7 +367,7 @@ void decodeFontVariations(Dart_Handle font_variations_data,
   }
 }
 
-void ParagraphBuilder::pushStyle(tonic::Int32List& encoded,
+void ParagraphBuilder::pushStyle(const tonic::Int32List& encoded,
                                  const std::vector<std::string>& fontFamilies,
                                  double fontSize,
                                  double letterSpacing,
@@ -411,7 +388,7 @@ void ParagraphBuilder::pushStyle(tonic::Int32List& encoded,
 
   // Set to use the properties of the previous style if the property is not
   // explicitly given.
-  txt::TextStyle style = m_paragraphBuilder->PeekStyle();
+  txt::TextStyle style = m_paragraph_builder_->PeekStyle();
 
   style.half_leading = mask & kTSLeadingDistributionMask;
   // Only change the style property from the previous value if a new explicitly
@@ -470,7 +447,7 @@ void ParagraphBuilder::pushStyle(tonic::Int32List& encoded,
 
   if (mask & kTSHeightMask) {
     style.height = height;
-    style.has_height_override = true;
+    style.has_height_override = style.height != kTextHeightNone;
   }
 
   if (mask & kTSLocaleMask) {
@@ -480,18 +457,18 @@ void ParagraphBuilder::pushStyle(tonic::Int32List& encoded,
   if (mask & kTSBackgroundMask) {
     Paint background(background_objects, background_data);
     if (background.isNotNull()) {
-      SkPaint sk_paint;
-      style.has_background = true;
-      style.background = *background.paint(sk_paint);
+      DlPaint dl_paint;
+      background.toDlPaint(dl_paint, DlTileMode::kDecal);
+      style.background = dl_paint;
     }
   }
 
   if (mask & kTSForegroundMask) {
     Paint foreground(foreground_objects, foreground_data);
     if (foreground.isNotNull()) {
-      SkPaint sk_paint;
-      style.has_foreground = true;
-      style.foreground = *foreground.paint(sk_paint);
+      DlPaint dl_paint;
+      foreground.toDlPaint(dl_paint, DlTileMode::kDecal);
+      style.foreground = dl_paint;
     }
   }
 
@@ -514,11 +491,11 @@ void ParagraphBuilder::pushStyle(tonic::Int32List& encoded,
     decodeFontVariations(font_variations_data, style.font_variations);
   }
 
-  m_paragraphBuilder->PushStyle(style);
+  m_paragraph_builder_->PushStyle(style);
 }
 
 void ParagraphBuilder::pop() {
-  m_paragraphBuilder->Pop();
+  m_paragraph_builder_->Pop();
 }
 
 Dart_Handle ParagraphBuilder::addText(const std::u16string& text) {
@@ -536,27 +513,27 @@ Dart_Handle ParagraphBuilder::addText(const std::u16string& text) {
     return tonic::ToDart("string is not well-formed UTF-16");
   }
 
-  m_paragraphBuilder->AddText(text);
+  m_paragraph_builder_->AddText(text);
 
   return Dart_Null();
 }
 
-Dart_Handle ParagraphBuilder::addPlaceholder(double width,
-                                             double height,
-                                             unsigned alignment,
-                                             double baseline_offset,
-                                             unsigned baseline) {
+void ParagraphBuilder::addPlaceholder(double width,
+                                      double height,
+                                      unsigned alignment,
+                                      double baseline_offset,
+                                      unsigned baseline) {
   txt::PlaceholderRun placeholder_run(
       width, height, static_cast<txt::PlaceholderAlignment>(alignment),
       static_cast<txt::TextBaseline>(baseline), baseline_offset);
 
-  m_paragraphBuilder->AddPlaceholder(placeholder_run);
-
-  return Dart_Null();
+  m_paragraph_builder_->AddPlaceholder(placeholder_run);
 }
 
 void ParagraphBuilder::build(Dart_Handle paragraph_handle) {
-  Paragraph::Create(paragraph_handle, m_paragraphBuilder->Build());
+  Paragraph::Create(paragraph_handle, m_paragraph_builder_->Build());
+  m_paragraph_builder_.reset();
+  ClearDartWrapper();
 }
 
 }  // namespace flutter

@@ -2,55 +2,109 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#pragma once
+#ifndef FLUTTER_IMPELLER_GEOMETRY_PATH_COMPONENT_H_
+#define FLUTTER_IMPELLER_GEOMETRY_PATH_COMPONENT_H_
 
+#include <functional>
+#include <optional>
+#include <type_traits>
 #include <vector>
 
 #include "impeller/geometry/point.h"
-#include "impeller/geometry/rect.h"
 #include "impeller/geometry/scalar.h"
 
 namespace impeller {
 
-/// Information about how to approximate points on a curved path segment.
-///
-/// In particular, the values in this object control how many vertices to
-/// generate when approximating curves, and what tolerances to use when
-/// calculating the sharpness of curves.
-struct SmoothingApproximation {
-  /// The scaling coefficient to use when translating to screen coordinates.
-  ///
-  /// Values approaching 0.0 will generate smoother looking curves with a
-  /// greater number of vertices, and will be more expensive to calculate.
-  Scalar scale;
+/// @brief An interface for generating a multi contour polyline as a triangle
+///        strip.
+class VertexWriter {
+ public:
+  virtual void EndContour() = 0;
 
-  /// The tolerance value in radians for calculating sharp angles.
-  ///
-  /// Values approaching 0.0 will provide more accurate approximation of sharp
-  /// turns. A 0.0 value means angle conditions are not considered at all.
-  Scalar angle_tolerance;
+  virtual void Write(Point point) = 0;
+};
 
-  /// An angle in radians at which to introduce bevel cuts.
-  ///
-  /// Values greater than zero will restirct the sharpness of bevel cuts on
-  /// turns.
-  Scalar cusp_limit;
+/// @brief A vertex writer that generates a triangle fan and requires primitive
+/// restart.
+class FanVertexWriter : public VertexWriter {
+ public:
+  explicit FanVertexWriter(Point* point_buffer, uint16_t* index_buffer);
 
-  /// Used to more quickly detect colinear cases.
-  Scalar distance_tolerance_square;
+  ~FanVertexWriter();
 
-  SmoothingApproximation(/* default */)
-      : SmoothingApproximation(1.0 /* scale */,
-                               0.0 /* angle tolerance */,
-                               0.0 /* cusp limit */) {}
+  size_t GetIndexCount() const;
 
-  SmoothingApproximation(Scalar p_scale,
-                         Scalar p_angle_tolerance,
-                         Scalar p_cusp_limit)
-      : scale(p_scale),
-        angle_tolerance(p_angle_tolerance),
-        cusp_limit(p_cusp_limit),
-        distance_tolerance_square(0.5 * p_scale * 0.5 * p_scale) {}
+  void EndContour() override;
+
+  void Write(Point point) override;
+
+ private:
+  size_t count_ = 0;
+  size_t index_count_ = 0;
+  Point* point_buffer_ = nullptr;
+  uint16_t* index_buffer_ = nullptr;
+};
+
+/// @brief A vertex writer that generates a triangle strip and requires
+///        primitive restart.
+class StripVertexWriter : public VertexWriter {
+ public:
+  explicit StripVertexWriter(Point* point_buffer, uint16_t* index_buffer);
+
+  ~StripVertexWriter();
+
+  size_t GetIndexCount() const;
+
+  void EndContour() override;
+
+  void Write(Point point) override;
+
+ private:
+  size_t count_ = 0;
+  size_t index_count_ = 0;
+  size_t contour_start_ = 0;
+  Point* point_buffer_ = nullptr;
+  uint16_t* index_buffer_ = nullptr;
+};
+
+/// @brief A vertex writer that generates a line strip topology.
+class LineStripVertexWriter : public VertexWriter {
+ public:
+  explicit LineStripVertexWriter(std::vector<Point>& points);
+
+  ~LineStripVertexWriter() = default;
+
+  void EndContour() override;
+
+  void Write(Point point) override;
+
+  std::pair<size_t, size_t> GetVertexCount() const;
+
+  const std::vector<Point>& GetOversizedBuffer() const;
+
+ private:
+  size_t offset_ = 0u;
+  std::vector<Point>& points_;
+  std::vector<Point> overflow_;
+};
+
+/// @brief A vertex writer that has no hardware requirements.
+class GLESVertexWriter : public VertexWriter {
+ public:
+  explicit GLESVertexWriter(std::vector<Point>& points,
+                            std::vector<uint16_t>& indices);
+
+  ~GLESVertexWriter() = default;
+
+  void EndContour() override;
+
+  void Write(Point point) override;
+
+ private:
+  bool previous_contour_odd_points_ = false;
+  size_t contour_start_ = 0u;
+  std::vector<Point>& points_;
+  std::vector<uint16_t>& indices_;
 };
 
 struct LinearPathComponent {
@@ -63,18 +117,26 @@ struct LinearPathComponent {
 
   Point Solve(Scalar time) const;
 
-  std::vector<Point> CreatePolyline() const;
+  void AppendPolylinePoints(std::vector<Point>& points) const;
 
   std::vector<Point> Extrema() const;
 
   bool operator==(const LinearPathComponent& other) const {
     return p1 == other.p1 && p2 == other.p2;
   }
+
+  std::optional<Vector2> GetStartDirection() const;
+
+  std::optional<Vector2> GetEndDirection() const;
 };
 
+// A component that represets a Quadratic Bézier curve.
 struct QuadraticPathComponent {
+  // Start point.
   Point p1;
+  // Control point.
   Point cp;
+  // End point.
   Point p2;
 
   QuadraticPathComponent() {}
@@ -86,25 +148,42 @@ struct QuadraticPathComponent {
 
   Point SolveDerivative(Scalar time) const;
 
-  std::vector<Point> CreatePolyline(
-      const SmoothingApproximation& approximation) const;
+  void AppendPolylinePoints(Scalar scale_factor,
+                            std::vector<Point>& points) const;
+
+  using PointProc = std::function<void(const Point& point)>;
+
+  void ToLinearPathComponents(Scalar scale_factor, const PointProc& proc) const;
+
+  void ToLinearPathComponents(Scalar scale, VertexWriter& writer) const;
+
+  size_t CountLinearPathComponents(Scalar scale) const;
 
   std::vector<Point> Extrema() const;
 
   bool operator==(const QuadraticPathComponent& other) const {
     return p1 == other.p1 && cp == other.cp && p2 == other.p2;
   }
+
+  std::optional<Vector2> GetStartDirection() const;
+
+  std::optional<Vector2> GetEndDirection() const;
 };
 
+// A component that represets a Cubic Bézier curve.
 struct CubicPathComponent {
+  // Start point.
   Point p1;
+  // The first control point.
   Point cp1;
+  // The second control point.
   Point cp2;
+  // End point.
   Point p2;
 
   CubicPathComponent() {}
 
-  CubicPathComponent(const QuadraticPathComponent& q)
+  explicit CubicPathComponent(const QuadraticPathComponent& q)
       : p1(q.p1),
         cp1(q.p1 + (q.cp - q.p1) * (2.0 / 3.0)),
         cp2(q.p2 + (q.cp - q.p2) * (2.0 / 3.0)),
@@ -117,29 +196,55 @@ struct CubicPathComponent {
 
   Point SolveDerivative(Scalar time) const;
 
-  std::vector<Point> CreatePolyline(
-      const SmoothingApproximation& approximation) const;
+  void AppendPolylinePoints(Scalar scale, std::vector<Point>& points) const;
 
   std::vector<Point> Extrema() const;
+
+  using PointProc = std::function<void(const Point& point)>;
+
+  void ToLinearPathComponents(Scalar scale, const PointProc& proc) const;
+
+  void ToLinearPathComponents(Scalar scale, VertexWriter& writer) const;
+
+  size_t CountLinearPathComponents(Scalar scale) const;
+
+  CubicPathComponent Subsegment(Scalar t0, Scalar t1) const;
 
   bool operator==(const CubicPathComponent& other) const {
     return p1 == other.p1 && cp1 == other.cp1 && cp2 == other.cp2 &&
            p2 == other.p2;
   }
+
+  std::optional<Vector2> GetStartDirection() const;
+
+  std::optional<Vector2> GetEndDirection() const;
+
+ private:
+  QuadraticPathComponent Lower() const;
 };
 
 struct ContourComponent {
   Point destination;
-  bool is_closed = false;
+
+  // 0, 0 for closed, anything else for open.
+  Point closed = Point(1, 1);
 
   ContourComponent() {}
 
-  ContourComponent(Point p, bool is_closed = false)
-      : destination(p), is_closed(is_closed) {}
+  constexpr bool IsClosed() const { return closed == Point{0, 0}; }
+
+  explicit ContourComponent(Point p, Point closed)
+      : destination(p), closed(closed) {}
 
   bool operator==(const ContourComponent& other) const {
-    return destination == other.destination && is_closed == other.is_closed;
+    return destination == other.destination && IsClosed() == other.IsClosed();
   }
 };
 
+static_assert(!std::is_polymorphic<LinearPathComponent>::value);
+static_assert(!std::is_polymorphic<QuadraticPathComponent>::value);
+static_assert(!std::is_polymorphic<CubicPathComponent>::value);
+
 }  // namespace impeller
+
+#endif  // FLUTTER_IMPELLER_GEOMETRY_PATH_COMPONENT_H_

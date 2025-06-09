@@ -5,18 +5,31 @@
 @JS()
 library js_promise;
 
-import 'package:js/js.dart';
+import 'dart:js_interop';
+import 'dart:js_interop_unsafe';
 
-/// Type-safe JS Promises
-@JS('Promise')
-abstract class Promise<T> {
-  /// A constructor for a JS promise
-  external factory Promise(PromiseExecutor<T> executor);
+/// This is the same as package:js_interop's FutureToPromise (.toJS), but with
+/// a more descriptive error message.
+extension CustomFutureOfJSAnyToJSPromise<T extends JSAny?> on Future<T> {
+  /// A [JSPromise] that either resolves with the result of the completed
+  /// [Future] or rejects with an object that contains its error.
+  JSPromise<T> get toPromise {
+    // TODO(ditman): Move to js_interop's .toJS, https://github.com/dart-lang/sdk/issues/56898
+    return JSPromise<T>((JSFunction resolve, JSFunction reject) {
+      then((JSAny? value) {
+        resolve.callAsFunction(resolve, value);
+      }, onError: (Object error, StackTrace stackTrace) {
+        final errorConstructor = globalContext['Error']! as JSFunction;
+        var userError = '$error\n';
+        // Only append the stack trace string if it looks like a DDC one...
+        final stackTraceString = stackTrace.toString();
+        if (!stackTraceString.startsWith('\n')) {
+          userError += '\nDart stack trace:\n$stackTraceString';
+        }
+        final wrapper =
+            errorConstructor.callAsConstructor<JSObject>(userError.toJS);
+        reject.callAsFunction(reject, wrapper);
+      });
+    }.toJS);
+  }
 }
-
-/// The type of function that is used to create a Promise<T>
-typedef PromiseExecutor<T> = void Function(PromiseResolver<T> resolve, PromiseRejecter reject);
-/// The type of function used to resolve a Promise<T>
-typedef PromiseResolver<T> = void Function(T result);
-/// The type of function used to reject a Promise (of any <T>)
-typedef PromiseRejecter = void Function(Object? error);

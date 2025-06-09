@@ -5,14 +5,14 @@
 #ifndef FLUTTER_FLOW_RASTER_CACHE_ITEM_H_
 #define FLUTTER_FLOW_RASTER_CACHE_ITEM_H_
 
+#if !SLIMPELLER
+
 #include <memory>
 #include <optional>
+#include <utility>
 
+#include "flutter/display_list/dl_canvas.h"
 #include "flutter/flow/raster_cache_key.h"
-#include "include/core/SkCanvas.h"
-#include "include/core/SkPaint.h"
-#include "include/core/SkPicture.h"
-#include "include/core/SkPoint.h"
 
 namespace flutter {
 
@@ -22,7 +22,6 @@ class DisplayList;
 class RasterCache;
 class LayerRasterCacheItem;
 class DisplayListRasterCacheItem;
-class SkPictureRasterCacheItem;
 
 class RasterCacheItem {
  public:
@@ -35,22 +34,22 @@ class RasterCacheItem {
   explicit RasterCacheItem(RasterCacheKeyID key_id,
                            CacheState cache_state = CacheState::kNone,
                            unsigned child_entries = 0)
-      : key_id_(key_id),
+      : key_id_(std::move(key_id)),
         cache_state_(cache_state),
         child_items_(child_entries) {}
 
   virtual void PrerollSetup(PrerollContext* context,
-                            const SkMatrix& matrix) = 0;
+                            const DlMatrix& matrix) = 0;
 
   virtual void PrerollFinalize(PrerollContext* context,
-                               const SkMatrix& matrix) = 0;
+                               const DlMatrix& matrix) = 0;
 
   virtual bool Draw(const PaintContext& context,
-                    const SkPaint* paint) const = 0;
+                    const DlPaint* paint) const = 0;
 
   virtual bool Draw(const PaintContext& context,
-                    SkCanvas* canvas,
-                    const SkPaint* paint) const = 0;
+                    DlCanvas* canvas,
+                    const DlPaint* paint) const = 0;
 
   virtual std::optional<RasterCacheKeyID> GetId() const { return key_id_; }
 
@@ -59,6 +58,7 @@ class RasterCacheItem {
 
   unsigned child_items() const { return child_items_; }
 
+  void set_matrix(const DlMatrix& matrix) { matrix_ = ToSkMatrix(matrix); }
   void set_matrix(const SkMatrix& matrix) { matrix_ = matrix; }
 
   CacheState cache_state() const { return cache_state_; }
@@ -76,5 +76,7 @@ class RasterCacheItem {
 };
 
 }  // namespace flutter
+
+#endif  //  !SLIMPELLER
 
 #endif  // FLUTTER_FLOW_RASTER_CACHE_ITEM_H_

@@ -6,9 +6,7 @@
 
 #include <utility>
 
-#include "flutter/display_list/display_list_builder.h"
-#include "flutter/display_list/display_list_flags.h"
-#include "flutter/flow/layer_snapshot_store.h"
+#include "flutter/display_list/dl_builder.h"
 #include "flutter/flow/layers/cacheable_layer.h"
 #include "flutter/flow/layers/offscreen_surface.h"
 #include "flutter/flow/raster_cache.h"
@@ -16,16 +14,17 @@
 
 namespace flutter {
 
-DisplayListLayer::DisplayListLayer(const SkPoint& offset,
-                                   SkiaGPUObject<DisplayList> display_list,
+DisplayListLayer::DisplayListLayer(const DlPoint& offset,
+                                   sk_sp<DisplayList> display_list,
                                    bool is_complex,
                                    bool will_change)
     : offset_(offset), display_list_(std::move(display_list)) {
-  if (display_list_.skia_object() != nullptr) {
-    bounds_ = display_list_.skia_object()->bounds().makeOffset(offset_.x(),
-                                                               offset_.y());
+  if (display_list_) {
+    bounds_ = display_list_->GetBounds().Shift(offset_.x, offset_.y);
+#if !SLIMPELLER
     display_list_raster_cache_item_ = DisplayListRasterCacheItem::Make(
-        display_list_.skia_object().get(), offset_, is_complex, will_change);
+        display_list_, ToSkPoint(offset_), is_complex, will_change);
+#endif  //  !SLIMPELLER
   }
 }
 
@@ -51,20 +50,19 @@ void DisplayListLayer::Diff(DiffContext* context, const Layer* old_layer) {
                Compare(dummy_statistics, this, prev));
 #endif
   }
-  context->PushTransform(SkMatrix::Translate(offset_.x(), offset_.y()));
+  context->PushTransform(DlMatrix::MakeTranslation(offset_));
   if (context->has_raster_cache()) {
-    context->SetTransform(
-        RasterCacheUtil::GetIntegralTransCTM(context->GetTransform()));
+    context->WillPaintWithIntegralTransform();
   }
-  context->AddLayerBounds(display_list()->bounds());
+  context->AddLayerBounds(display_list()->GetBounds());
   context->SetLayerPaintRegion(this, context->CurrentSubtreeRegion());
 }
 
 bool DisplayListLayer::Compare(DiffContext::Statistics& statistics,
                                const DisplayListLayer* l1,
                                const DisplayListLayer* l2) {
-  const auto& dl1 = l1->display_list_.skia_object();
-  const auto& dl2 = l2->display_list_.skia_object();
+  const auto& dl1 = l1->display_list_;
+  const auto& dl2 = l2->display_list_;
   if (dl1.get() == dl2.get()) {
     statistics.AddSameInstancePicture();
     return true;
@@ -95,82 +93,45 @@ bool DisplayListLayer::Compare(DiffContext::Statistics& statistics,
   return res;
 }
 
-void DisplayListLayer::Preroll(PrerollContext* context,
-                               const SkMatrix& matrix) {
-  TRACE_EVENT0("flutter", "DisplayListLayer::Preroll");
+void DisplayListLayer::Preroll(PrerollContext* context) {
   DisplayList* disp_list = display_list();
-  SkMatrix child_matrix = matrix;
 
-  AutoCache cache =
-      AutoCache(display_list_raster_cache_item_.get(), context, child_matrix);
+#if !SLIMPELLER
+  AutoCache cache = AutoCache(display_list_raster_cache_item_.get(), context,
+                              context->state_stack.matrix());
+#endif  //  !SLIMPELLER
   if (disp_list->can_apply_group_opacity()) {
-    context->subtree_can_inherit_opacity = true;
+    context->renderable_state_flags = LayerStateStack::kCallerCanApplyOpacity;
   }
   set_paint_bounds(bounds_);
 }
 
 void DisplayListLayer::Paint(PaintContext& context) const {
-  TRACE_EVENT0("flutter", "DisplayListLayer::Paint");
-  FML_DCHECK(display_list_.skia_object());
+  FML_DCHECK(display_list_);
   FML_DCHECK(needs_painting(context));
 
-  SkAutoCanvasRestore save(context.leaf_nodes_canvas, true);
-  context.leaf_nodes_canvas->translate(offset_.x(), offset_.y());
+  auto mutator = context.state_stack.save();
+  mutator.translate(offset_.x, offset_.y);
+
+#if !SLIMPELLER
   if (context.raster_cache) {
-    context.leaf_nodes_canvas->setMatrix(RasterCacheUtil::GetIntegralTransCTM(
-        context.leaf_nodes_canvas->getTotalMatrix()));
-  }
+    // Always apply the integral transform in the presence of a raster cache
+    // whether or not we successfully draw from the cache
+    mutator.integralTransform();
 
-  if (context.raster_cache && display_list_raster_cache_item_) {
-    AutoCachePaint cache_paint(context);
-    if (display_list_raster_cache_item_->Draw(context,
-                                              cache_paint.sk_paint())) {
-      TRACE_EVENT_INSTANT0("flutter", "raster cache hit");
-      return;
+    if (display_list_raster_cache_item_) {
+      DlPaint paint;
+      if (display_list_raster_cache_item_->Draw(
+              context, context.state_stack.fill(paint))) {
+        TRACE_EVENT_INSTANT0("flutter", "raster cache hit");
+        return;
+      }
     }
   }
+#endif  //  !SLIMPELLER
 
-  if (context.enable_leaf_layer_tracing) {
-    const auto canvas_size = context.leaf_nodes_canvas->getBaseLayerSize();
-    auto offscreen_surface =
-        std::make_unique<OffscreenSurface>(context.gr_context, canvas_size);
-
-    const auto& ctm = context.leaf_nodes_canvas->getTotalMatrix();
-
-    const auto start_time = fml::TimePoint::Now();
-    {
-      // render display list to offscreen surface.
-      auto* canvas = offscreen_surface->GetCanvas();
-      SkAutoCanvasRestore save(canvas, true);
-      canvas->clear(SK_ColorTRANSPARENT);
-      canvas->setMatrix(ctm);
-      display_list()->RenderTo(canvas, context.inherited_opacity);
-      canvas->flush();
-    }
-    const fml::TimeDelta offscreen_render_time =
-        fml::TimePoint::Now() - start_time;
-
-    const SkRect device_bounds =
-        RasterCacheUtil::GetDeviceBounds(paint_bounds(), ctm);
-    sk_sp<SkData> raster_data = offscreen_surface->GetRasterData(true);
-    LayerSnapshotData snapshot_data(unique_id(), offscreen_render_time,
-                                    raster_data, device_bounds);
-    context.layer_snapshot_store->Add(snapshot_data);
-  }
-
-  if (context.leaf_nodes_builder) {
-    AutoCachePaint save_paint(context);
-    int restore_count = context.leaf_nodes_builder->getSaveCount();
-    if (save_paint.dl_paint() != nullptr) {
-      context.leaf_nodes_builder->saveLayer(&paint_bounds(),
-                                            save_paint.dl_paint());
-    }
-    context.leaf_nodes_builder->drawDisplayList(display_list_.skia_object());
-    context.leaf_nodes_builder->restoreToCount(restore_count);
-  } else {
-    display_list()->RenderTo(context.leaf_nodes_canvas,
-                             context.inherited_opacity);
-  }
+  DlScalar opacity = context.state_stack.outstanding_opacity();
+  context.canvas->DrawDisplayList(display_list_, opacity);
 }
 
 }  // namespace flutter

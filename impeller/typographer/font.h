@@ -2,17 +2,31 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#pragma once
+#ifndef FLUTTER_IMPELLER_TYPOGRAPHER_FONT_H_
+#define FLUTTER_IMPELLER_TYPOGRAPHER_FONT_H_
 
 #include <memory>
-#include <optional>
 
-#include "flutter/fml/macros.h"
+#include "fml/hash_combine.h"
 #include "impeller/base/comparable.h"
-#include "impeller/typographer/glyph.h"
+#include "impeller/geometry/scalar.h"
 #include "impeller/typographer/typeface.h"
 
 namespace impeller {
+
+//------------------------------------------------------------------------------
+/// @brief      Determines the axis along which there is subpixel positioning.
+///
+enum class AxisAlignment : uint8_t {
+  // No subpixel positioning.
+  kNone,
+  // Subpixel positioning in the X axis only.
+  kX,
+  // Subpixel positioning in the Y axis only.
+  kY,
+  // No specific axis, subpixel positioning in each direction.
+  kAll,
+};
 
 //------------------------------------------------------------------------------
 /// @brief      Describes a typeface along with any modifications to its
@@ -29,59 +43,22 @@ class Font : public Comparable<Font> {
   ///
   struct Metrics {
     //--------------------------------------------------------------------------
-    /// The scaling factor that should be used when rendering this font to an
-    /// atlas. This should normally be set in accordance with the transformation
-    /// matrix that will be used to position glyph geometry.
-    ///
-    Scalar scale = 1.0f;
-    //--------------------------------------------------------------------------
     /// The point size of the font.
     ///
     Scalar point_size = 12.0f;
-    //--------------------------------------------------------------------------
-    /// The font ascent relative to the baseline. This is usually negative as
-    /// moving upwards (ascending) in an upper-left-origin coordinate system
-    /// yields smaller numbers.
-    ///
-    Scalar ascent = 0.0f;
-    //--------------------------------------------------------------------------
-    /// The font descent relative to the baseline. This is usually positive as
-    /// moving downwards (descending) in an upper-left-origin coordinate system
-    /// yields larger numbers.
-    ///
-    Scalar descent = 0.0f;
-    //--------------------------------------------------------------------------
-    /// The minimum glyph extents relative to the origin. Typically negative in
-    /// an upper-left-origin coordinate system.
-    ///
-    Point min_extent;
-    //--------------------------------------------------------------------------
-    /// The maximum glyph extents relative to the origin. Typically positive in
-    /// an upper-left-origin coordinate system.
-    ///
-    Point max_extent;
-
-    //--------------------------------------------------------------------------
-    /// @brief      The union of the bounding boxes of all the glyphs.
-    ///
-    /// @return     The bounding box.
-    ///
-    constexpr Rect GetBoundingBox() const {
-      return Rect::MakeLTRB(min_extent.x,  //
-                            min_extent.y,  //
-                            max_extent.x,  //
-                            max_extent.y   //
-      );
-    }
+    bool embolden = false;
+    Scalar skewX = 0.0f;
+    Scalar scaleX = 1.0f;
 
     constexpr bool operator==(const Metrics& o) const {
-      return scale == o.scale && point_size == o.point_size &&
-             ascent == o.ascent && descent == o.descent &&
-             min_extent == o.min_extent && max_extent == o.max_extent;
+      return point_size == o.point_size && embolden == o.embolden &&
+             skewX == o.skewX && scaleX == o.scaleX;
     }
   };
 
-  Font(std::shared_ptr<Typeface> typeface, Metrics metrics);
+  Font(std::shared_ptr<Typeface> typeface,
+       Metrics metrics,
+       AxisAlignment axis_alignment);
 
   ~Font();
 
@@ -102,9 +79,12 @@ class Font : public Comparable<Font> {
   // |Comparable<Font>|
   bool IsEqual(const Font& other) const override;
 
+  AxisAlignment GetAxisAlignment() const;
+
  private:
   std::shared_ptr<Typeface> typeface_;
   Metrics metrics_ = {};
+  AxisAlignment axis_alignment_;
   bool is_valid_ = false;
 };
 
@@ -113,6 +93,8 @@ class Font : public Comparable<Font> {
 template <>
 struct std::hash<impeller::Font::Metrics> {
   constexpr std::size_t operator()(const impeller::Font::Metrics& m) const {
-    return fml::HashCombine(m.scale, m.point_size, m.ascent, m.descent);
+    return fml::HashCombine(m.point_size, m.skewX, m.scaleX);
   }
 };
+
+#endif  // FLUTTER_IMPELLER_TYPOGRAPHER_FONT_H_

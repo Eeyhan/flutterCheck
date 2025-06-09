@@ -7,11 +7,11 @@
 
 #include <memory>
 
+#include "flutter/common/macros.h"
 #include "flutter/display_list/display_list.h"
 #include "flutter/flow/layers/display_list_raster_cache_item.h"
 #include "flutter/flow/layers/layer.h"
 #include "flutter/flow/raster_cache_item.h"
-#include "flutter/flow/skia_gpu_object.h"
 
 namespace flutter {
 
@@ -19,14 +19,12 @@ class DisplayListLayer : public Layer {
  public:
   static constexpr size_t kMaxBytesToCompare = 10000;
 
-  DisplayListLayer(const SkPoint& offset,
-                   SkiaGPUObject<DisplayList> display_list,
+  DisplayListLayer(const DlPoint& offset,
+                   sk_sp<DisplayList> display_list,
                    bool is_complex,
                    bool will_change);
 
-  DisplayList* display_list() const {
-    return display_list_.skia_object().get();
-  }
+  DisplayList* display_list() const { return display_list_.get(); }
 
   bool IsReplacing(DiffContext* context, const Layer* layer) const override;
 
@@ -36,21 +34,29 @@ class DisplayListLayer : public Layer {
     return this;
   }
 
-  void Preroll(PrerollContext* frame, const SkMatrix& matrix) override;
+  void Preroll(PrerollContext* frame) override;
 
   void Paint(PaintContext& context) const override;
 
+#if !SLIMPELLER
   const DisplayListRasterCacheItem* raster_cache_item() const {
     return display_list_raster_cache_item_.get();
   }
 
+  RasterCacheKeyID caching_key_id() const override {
+    return RasterCacheKeyID(display_list()->unique_id(),
+                            RasterCacheKeyType::kDisplayList);
+  }
+#endif  //  !SLIMPELLER
+
  private:
-  std::unique_ptr<DisplayListRasterCacheItem> display_list_raster_cache_item_;
+  NOT_SLIMPELLER(std::unique_ptr<DisplayListRasterCacheItem>
+                     display_list_raster_cache_item_);
 
-  SkPoint offset_;
-  SkRect bounds_;
+  DlPoint offset_;
+  DlRect bounds_;
 
-  flutter::SkiaGPUObject<DisplayList> display_list_;
+  sk_sp<DisplayList> display_list_;
 
   static bool Compare(DiffContext::Statistics& statistics,
                       const DisplayListLayer* l1,

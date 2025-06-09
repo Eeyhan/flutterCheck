@@ -4,8 +4,13 @@
 
 #include "flutter/lib/ui/painting/image_filter.h"
 
+#include "display_list/dl_sampling_options.h"
+#include "display_list/effects/dl_image_filters.h"
+#include "flutter/lib/ui/floating_point.h"
 #include "flutter/lib/ui/painting/matrix.h"
 #include "flutter/lib/ui/ui_dart_state.h"
+#include "lib/ui/painting/fragment_program.h"
+#include "lib/ui/painting/fragment_shader.h"
 #include "third_party/tonic/converter/dart_converter.h"
 #include "third_party/tonic/dart_args.h"
 #include "third_party/tonic/dart_binding_macros.h"
@@ -13,31 +18,12 @@
 
 namespace flutter {
 
-static void ImageFilter_constructor(Dart_NativeArguments args) {
-  UIDartState::ThrowIfUIOperationsProhibited();
-  DartCallConstructor(&ImageFilter::Create, args);
-}
-
 IMPLEMENT_WRAPPERTYPEINFO(ui, ImageFilter);
 
-#define FOR_EACH_BINDING(V)       \
-  V(ImageFilter, initBlur)        \
-  V(ImageFilter, initDilate)      \
-  V(ImageFilter, initErode)       \
-  V(ImageFilter, initMatrix)      \
-  V(ImageFilter, initColorFilter) \
-  V(ImageFilter, initComposeFilter)
-
-FOR_EACH_BINDING(DART_NATIVE_CALLBACK)
-
-void ImageFilter::RegisterNatives(tonic::DartLibraryNatives* natives) {
-  natives->Register(
-      {{"ImageFilter_constructor", ImageFilter_constructor, 1, true},
-       FOR_EACH_BINDING(DART_REGISTER_NATIVE)});
-}
-
-fml::RefPtr<ImageFilter> ImageFilter::Create() {
-  return fml::MakeRefCounted<ImageFilter>();
+void ImageFilter::Create(Dart_Handle wrapper) {
+  UIDartState::ThrowIfUIOperationsProhibited();
+  auto res = fml::MakeRefCounted<ImageFilter>();
+  res->AssociateWithDartWrapper(wrapper);
 }
 
 static const std::array<DlImageSampling, 4> kFilterQualities = {
@@ -69,38 +55,74 @@ ImageFilter::ImageFilter() {}
 
 ImageFilter::~ImageFilter() {}
 
+const std::shared_ptr<DlImageFilter> ImageFilter::filter(
+    DlTileMode mode) const {
+  if (is_dynamic_tile_mode_) {
+    FML_DCHECK(filter_.get() != nullptr);
+    const DlBlurImageFilter* blur_filter = filter_->asBlur();
+    FML_DCHECK(blur_filter != nullptr);
+    if (blur_filter->tile_mode() != mode) {
+      return DlBlurImageFilter::Make(blur_filter->sigma_x(),
+                                     blur_filter->sigma_y(), mode);
+    }
+  }
+  return filter_;
+}
+
 void ImageFilter::initBlur(double sigma_x,
                            double sigma_y,
-                           SkTileMode tile_mode) {
-  filter_ =
-      std::make_shared<DlBlurImageFilter>(sigma_x, sigma_y, ToDl(tile_mode));
+                           int tile_mode_index) {
+  DlTileMode tile_mode;
+  bool is_dynamic;
+  if (tile_mode_index < 0) {
+    is_dynamic = true;
+    tile_mode = DlTileMode::kClamp;
+  } else {
+    is_dynamic = false;
+    tile_mode = static_cast<DlTileMode>(tile_mode_index);
+  }
+  filter_ = DlBlurImageFilter::Make(SafeNarrow(sigma_x), SafeNarrow(sigma_y),
+                                    tile_mode);
+  // If it was a NOP filter, don't bother processing dynamic substitutions
+  // (They'd fail the FML_DCHECK anyway)
+  is_dynamic_tile_mode_ = is_dynamic && filter_;
 }
 
 void ImageFilter::initDilate(double radius_x, double radius_y) {
-  filter_ = std::make_shared<DlDilateImageFilter>(radius_x, radius_y);
+  is_dynamic_tile_mode_ = false;
+  filter_ =
+      DlDilateImageFilter::Make(SafeNarrow(radius_x), SafeNarrow(radius_y));
 }
 
 void ImageFilter::initErode(double radius_x, double radius_y) {
-  filter_ = std::make_shared<DlErodeImageFilter>(radius_x, radius_y);
+  is_dynamic_tile_mode_ = false;
+  filter_ =
+      DlErodeImageFilter::Make(SafeNarrow(radius_x), SafeNarrow(radius_y));
 }
 
 void ImageFilter::initMatrix(const tonic::Float64List& matrix4,
                              int filterQualityIndex) {
+  is_dynamic_tile_mode_ = false;
   auto sampling = ImageFilter::SamplingFromIndex(filterQualityIndex);
-  filter_ =
-      std::make_shared<DlMatrixImageFilter>(ToSkMatrix(matrix4), sampling);
+  filter_ = DlMatrixImageFilter::Make(ToDlMatrix(matrix4), sampling);
 }
 
 void ImageFilter::initColorFilter(ColorFilter* colorFilter) {
   FML_DCHECK(colorFilter);
-  filter_ =
-      std::make_shared<DlColorFilterImageFilter>(colorFilter->dl_filter());
+  is_dynamic_tile_mode_ = false;
+  filter_ = DlColorFilterImageFilter::Make(colorFilter->filter());
 }
 
 void ImageFilter::initComposeFilter(ImageFilter* outer, ImageFilter* inner) {
   FML_DCHECK(outer && inner);
-  filter_ = std::make_shared<DlComposeImageFilter>(outer->dl_filter(),
-                                                   inner->dl_filter());
+  is_dynamic_tile_mode_ = false;
+  filter_ = DlComposeImageFilter::Make(outer->filter(DlTileMode::kClamp),
+                                       inner->filter(DlTileMode::kClamp));
+}
+
+void ImageFilter::initShader(ReusableFragmentShader* shader) {
+  FML_DCHECK(shader);
+  filter_ = shader->as_image_filter();
 }
 
 }  // namespace flutter

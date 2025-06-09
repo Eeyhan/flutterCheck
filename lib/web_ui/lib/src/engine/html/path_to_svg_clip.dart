@@ -3,8 +3,8 @@
 // found in the LICENSE file.
 
 import 'package:ui/ui.dart' as ui;
+import 'package:ui/ui_web/src/ui_web.dart' as ui_web;
 
-import '../browser_detection.dart';
 import '../dom.dart';
 import '../svg.dart';
 import 'path/path.dart';
@@ -47,11 +47,15 @@ SVGSVGElement pathToSvgClipPath(ui.Path path,
 
   // Firefox objectBoundingBox fails to scale to 1x1 units, instead use
   // no clipPathUnits but write the path in target units.
-  if (browserEngine != BrowserEngine.firefox) {
+  if (ui_web.browser.browserEngine != ui_web.BrowserEngine.firefox) {
     clipPath.setAttribute('clipPathUnits', 'objectBoundingBox');
     svgPath.setAttribute('transform', 'scale($scaleX, $scaleY)');
   }
-
+  if (path.fillType == ui.PathFillType.evenOdd) {
+    svgPath.setAttribute('clip-rule', 'evenodd');
+  } else {
+    svgPath.setAttribute('clip-rule', 'nonzero');
+  }
   svgPath.setAttribute('d', pathToSvg((path as SurfacePath).pathRef, offsetX: offsetX, offsetY: offsetY));
   return root;
 }

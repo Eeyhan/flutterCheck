@@ -4,14 +4,17 @@
 
 package dev.flutter.scenariosui;
 
+import android.app.Instrumentation;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import androidx.annotation.NonNull;
+import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.filters.LargeTest;
+import androidx.test.platform.app.InstrumentationRegistry;
 import androidx.test.rule.ActivityTestRule;
-import androidx.test.runner.AndroidJUnit4;
 import dev.flutter.scenarios.PlatformViewsActivity;
 import org.junit.Before;
+import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -19,7 +22,8 @@ import org.junit.runner.RunWith;
 @RunWith(AndroidJUnit4.class)
 @LargeTest
 public class PlatformViewWithSurfaceViewUiTest {
-  Intent intent;
+  private Instrumentation instrumentation;
+  private Intent intent;
 
   @Rule @NonNull
   public ActivityTestRule<PlatformViewsActivity> activityRule =
@@ -32,6 +36,7 @@ public class PlatformViewWithSurfaceViewUiTest {
 
   @Before
   public void setUp() {
+    instrumentation = InstrumentationRegistry.getInstrumentation();
     intent = new Intent(Intent.ACTION_MAIN);
     // Render a texture.
     intent.putExtra("use_android_view", false);
@@ -99,6 +104,7 @@ public class PlatformViewWithSurfaceViewUiTest {
     intent.putExtra("scenario_name", "platform_view_rotate");
     PlatformViewsActivity activity = activityRule.launchActivity(intent);
     activity.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
+    instrumentation.waitForIdleSync();
     ScreenshotUtil.capture(activity, goldName("testPlatformViewRotate"));
   }
 
@@ -124,9 +130,12 @@ public class PlatformViewWithSurfaceViewUiTest {
         goldName("testPlatformViewWithoutOverlayIntersection"));
   }
 
+  // TODO(dnfield): This is not safe until https://github.com/flutter/flutter/issues/31990
+  // is resolved.
+  @Ignore("not safe until https://github.com/flutter/flutter/issues/31990 is resolved")
   @Test
   public void testPlatformViewLargerThanDisplaySize() throws Exception {
-    // Regression test for https://github.com/flutter/flutter/issues/2897.
+    // Regression test for https://github.com/flutter/flutter/issues/28978.
     intent.putExtra("scenario_name", "platform_view_larger_than_display_size");
     ScreenshotUtil.capture(
         activityRule.launchActivity(intent), goldName("testPlatformViewLargerThanDisplaySize"));

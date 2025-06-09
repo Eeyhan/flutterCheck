@@ -9,20 +9,14 @@
 
 namespace flutter {
 
-class ClipRRectLayer : public ClipShapeLayer<SkRRect> {
+class ClipRRectLayer : public ClipShapeLayer<DlRoundRect> {
  public:
-  ClipRRectLayer(const SkRRect& clip_rrect, Clip clip_behavior);
-
-  void Preroll(PrerollContext* context, const SkMatrix& matrix) override;
-
-  void Paint(PaintContext& context) const override;
+  ClipRRectLayer(const DlRoundRect& clip_rrect, Clip clip_behavior);
 
  protected:
-  const SkRect& clip_shape_bounds() const override;
+  const DlRect clip_shape_bounds() const override;
 
-  void OnMutatorsStackPushClipShape(MutatorsStack& mutators_stack) override;
-
-  void OnCanvasClipShape(SkCanvas* canvas) const override;
+  void ApplyClip(LayerStateStack::MutatorContext& mutator) const override;
 
  private:
   FML_DISALLOW_COPY_AND_ASSIGN(ClipRRectLayer);

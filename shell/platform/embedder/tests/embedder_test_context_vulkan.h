@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef FLUTTER_SHELL_PLATFORM_EMBEDDER_TESTS_EMBEDDER_CONTEXT_VULKAN_H_
-#define FLUTTER_SHELL_PLATFORM_EMBEDDER_TESTS_EMBEDDER_CONTEXT_VULKAN_H_
+#ifndef FLUTTER_SHELL_PLATFORM_EMBEDDER_TESTS_EMBEDDER_TEST_CONTEXT_VULKAN_H_
+#define FLUTTER_SHELL_PLATFORM_EMBEDDER_TESTS_EMBEDDER_TEST_CONTEXT_VULKAN_H_
 
 #include <memory>
 #include "flutter/shell/platform/embedder/tests/embedder_test_context.h"
@@ -26,22 +26,32 @@ class EmbedderTestContextVulkan : public EmbedderTestContext {
   // |EmbedderTestContext|
   size_t GetSurfacePresentCount() const override;
 
-  // |EmbedderTestContext|
-  void SetupCompositor() override;
-
   VkImage GetNextImage(const SkISize& size);
 
   bool PresentImage(VkImage image);
 
+  void SetVulkanInstanceProcAddressCallback(
+      FlutterVulkanInstanceProcAddressCallback callback);
+
+  static void* InstanceProcAddr(void* user_data,
+                                FlutterVulkanInstanceHandle instance,
+                                const char* name);
+
  private:
+  // |EmbedderTestContext|
+  void SetSurface(SkISize surface_size) override;
+
+  // |EmbedderTestContext|
+  void SetupCompositor() override;
+
+  // The TestVulkanContext destructor must be called _after_ the compositor is
+  // freed.
+  fml::RefPtr<TestVulkanContext> vulkan_context_ = nullptr;
+
   std::unique_ptr<TestVulkanSurface> surface_;
 
   SkISize surface_size_ = SkISize::MakeEmpty();
   size_t present_count_ = 0;
-
-  void SetupSurface(SkISize surface_size) override;
-
-  friend class EmbedderConfigBuilder;
 
   FML_DISALLOW_COPY_AND_ASSIGN(EmbedderTestContextVulkan);
 };
@@ -49,4 +59,4 @@ class EmbedderTestContextVulkan : public EmbedderTestContext {
 }  // namespace testing
 }  // namespace flutter
 
-#endif  // FLUTTER_SHELL_PLATFORM_EMBEDDER_TESTS_EMBEDDER_CONTEXT_VULKAN_H_
+#endif  // FLUTTER_SHELL_PLATFORM_EMBEDDER_TESTS_EMBEDDER_TEST_CONTEXT_VULKAN_H_

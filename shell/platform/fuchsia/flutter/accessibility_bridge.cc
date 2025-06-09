@@ -161,6 +161,9 @@ std::string NodeActionsToString(const flutter::SemanticsNode& node) {
   if (node.HasAction(flutter::SemanticsAction::kScrollUp)) {
     output += "kScrollUp|";
   }
+  if (node.HasAction(flutter::SemanticsAction::kScrollToOffset)) {
+    output += "kScrollToOffset|";
+  }
   if (node.HasAction(flutter::SemanticsAction::kSetSelection)) {
     output += "kSetSelection|";
   }
@@ -172,6 +175,9 @@ std::string NodeActionsToString(const flutter::SemanticsNode& node) {
   }
   if (node.HasAction(flutter::SemanticsAction::kTap)) {
     output += "kTap|";
+  }
+  if (node.HasAction(flutter::SemanticsAction::kFocus)) {
+    output += "kFocus|";
   }
 
   return output;
@@ -338,6 +344,14 @@ fuchsia::accessibility::semantics::States AccessibilityBridge::GetNodeStates(
         node.HasFlag(flutter::SemanticsFlags::kIsChecked)
             ? fuchsia::accessibility::semantics::CheckedState::CHECKED
             : fuchsia::accessibility::semantics::CheckedState::UNCHECKED);
+  }
+
+  // Set enabled state.
+  if (node.HasFlag(flutter::SemanticsFlags::kHasEnabledState)) {
+    states.set_enabled_state(
+        node.HasFlag(flutter::SemanticsFlags::kIsEnabled)
+            ? fuchsia::accessibility::semantics::EnabledState::ENABLED
+            : fuchsia::accessibility::semantics::EnabledState::DISABLED);
   }
 
   // Set selected state.

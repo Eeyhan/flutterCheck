@@ -29,11 +29,16 @@ enum PointerDeviceKind {
 enum PointerSignalKind {
   none,
   scroll,
+  scrollInertiaCancel,
+  scale,
   unknown
 }
 
+typedef PointerDataRespondCallback = void Function({bool allowPlatformDefault});
+
 class PointerData {
   const PointerData({
+    this.viewId = 0,
     this.embedderId = 0,
     this.timeStamp = Duration.zero,
     this.change = PointerChange.cancel,
@@ -69,7 +74,9 @@ class PointerData {
     this.panDeltaY = 0.0,
     this.scale = 0.0,
     this.rotation = 0.0,
-  });
+    PointerDataRespondCallback? onRespond,
+  }) : _onRespond = onRespond;
+  final int viewId;
   final int embedderId;
   final Duration timeStamp;
   final PointerChange change;
@@ -105,9 +112,16 @@ class PointerData {
   final double panDeltaY;
   final double scale;
   final double rotation;
+  final PointerDataRespondCallback? _onRespond;
+
+  void respond({required bool allowPlatformDefault}) {
+    if (_onRespond != null) {
+      _onRespond(allowPlatformDefault: allowPlatformDefault);
+    }
+  }
 
   @override
-  String toString() => 'PointerData(x: $physicalX, y: $physicalY)';
+  String toString() => 'PointerData(viewId: $viewId, x: $physicalX, y: $physicalY)';
   String toStringFull() {
     return '$runtimeType('
            'embedderId: $embedderId, '
@@ -143,13 +157,13 @@ class PointerData {
            'panDeltaX: $panDeltaX, '
            'panDeltaY: $panDeltaY, '
            'scale: $scale, '
-           'rotation: $rotation'
+           'rotation: $rotation, '
+           'viewId: $viewId'
            ')';
   }
 }
 
 class PointerDataPacket {
-  const PointerDataPacket({this.data = const <PointerData>[]})
-      : assert(data != null); // ignore: unnecessary_null_comparison
+  const PointerDataPacket({this.data = const <PointerData>[]});
   final List<PointerData> data;
 }

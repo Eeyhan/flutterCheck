@@ -1,3 +1,7 @@
+// Copyright 2013 The Flutter Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
 package io.flutter.embedding.android;
 
 import static org.junit.Assert.assertNotNull;
@@ -265,6 +269,9 @@ public class FlutterAndroidComponentTest {
       return ApplicationProvider.getApplicationContext();
     }
 
+    @SuppressWarnings("deprecation")
+    // Robolectric.setupActivity
+    // TODO(reidbaker): https://github.com/flutter/flutter/issues/133151
     @Nullable
     @Override
     public Activity getActivity() {
@@ -290,6 +297,12 @@ public class FlutterAndroidComponentTest {
     @Override
     public String getCachedEngineId() {
       return "my_flutter_engine";
+    }
+
+    @Nullable
+    @Override
+    public String getCachedEngineGroupId() {
+      return "my_flutter_engine_group";
     }
 
     @Override
@@ -346,12 +359,6 @@ public class FlutterAndroidComponentTest {
 
     @Nullable
     @Override
-    public SplashScreen provideSplashScreen() {
-      return null;
-    }
-
-    @Nullable
-    @Override
     public FlutterEngine provideFlutterEngine(@NonNull Context context) {
       return cachedEngine;
     }
@@ -390,6 +397,16 @@ public class FlutterAndroidComponentTest {
     }
 
     @Override
+    public boolean attachToEngineAutomatically() {
+      return true;
+    }
+
+    @Override
+    public boolean getBackCallbackState() {
+      return false;
+    }
+
+    @Override
     public void onFlutterSurfaceViewCreated(@NonNull FlutterSurfaceView flutterSurfaceView) {}
 
     @Override
@@ -411,5 +428,8 @@ public class FlutterAndroidComponentTest {
     public boolean popSystemNavigator() {
       return false;
     }
+
+    @Override
+    public void setFrameworkHandlesBack(boolean frameworkHandlesBack) {}
   }
 }

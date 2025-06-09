@@ -27,10 +27,8 @@ class AndroidEGLSurface;
 ///
 class AndroidContextGLSkia : public AndroidContext {
  public:
-  AndroidContextGLSkia(AndroidRenderingAPI rendering_api,
-                       fml::RefPtr<AndroidEnvironmentGL> environment,
-                       const TaskRunners& taskRunners,
-                       uint8_t msaa_samples);
+  AndroidContextGLSkia(fml::RefPtr<AndroidEnvironmentGL> environment,
+                       const TaskRunners& taskRunners);
 
   ~AndroidContextGLSkia();
 
@@ -41,7 +39,7 @@ class AndroidContextGLSkia : public AndroidContext {
   /// @return     The window surface.
   ///
   std::unique_ptr<AndroidEGLSurface> CreateOnscreenSurface(
-      fml::RefPtr<AndroidNativeWindow> window) const;
+      const fml::RefPtr<AndroidNativeWindow>& window) const;
 
   //----------------------------------------------------------------------------
   /// @brief      Allocates an 1x1 pbuffer surface that is used for making the
@@ -75,6 +73,20 @@ class AndroidContextGLSkia : public AndroidContext {
   /// @return     Whether the current context was successfully clear.
   ///
   bool ClearCurrent() const;
+
+  //----------------------------------------------------------------------------
+  /// @brief      Returns the EGLContext.
+  ///
+  /// @return     EGLContext.
+  ///
+  EGLContext GetEGLContext() const;
+
+  //----------------------------------------------------------------------------
+  /// @brief      Returns the EGLDisplay.
+  ///
+  /// @return     EGLDisplay.
+  ///
+  EGLDisplay GetEGLDisplay() const;
 
   //----------------------------------------------------------------------------
   /// @brief      Create a new EGLContext using the same EGLConfig.

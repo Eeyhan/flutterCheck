@@ -3,11 +3,13 @@
 // found in the LICENSE file.
 
 import 'package:ui/ui.dart' as ui;
+import 'package:ui/ui_web/src/ui_web.dart' as ui_web;
 
-import '../browser_detection.dart';
+import '../color_filter.dart';
 import '../dom.dart';
 import '../util.dart';
 import '../vector_math.dart';
+import 'resource_manager.dart';
 import 'shaders/shader.dart';
 import 'surface.dart';
 import 'surface_stats.dart';
@@ -15,10 +17,9 @@ import 'surface_stats.dart';
 /// A surface that applies an image filter to background.
 class PersistedBackdropFilter extends PersistedContainerSurface
     implements ui.BackdropFilterEngineLayer {
-  PersistedBackdropFilter(PersistedBackdropFilter? oldLayer, this.filter)
-      : super(oldLayer);
+  PersistedBackdropFilter(PersistedBackdropFilter? super.oldLayer, this.filter);
 
-  final EngineImageFilter filter;
+  final ui.ImageFilter filter;
 
   /// The dedicated child container element that's separate from the
   /// [rootElement] is used to host child in front of [filterElement] that
@@ -27,6 +28,7 @@ class PersistedBackdropFilter extends PersistedContainerSurface
   DomElement? get childContainer => _childContainer;
   DomElement? _childContainer;
   DomElement? _filterElement;
+  DomElement? _svgFilter;
   ui.Rect? _activeClipBounds;
   // Cached inverted transform for [transform].
   late Matrix4 _invertedTransform;
@@ -38,6 +40,7 @@ class PersistedBackdropFilter extends PersistedContainerSurface
     super.adoptElements(oldSurface);
     _childContainer = oldSurface._childContainer;
     _filterElement = oldSurface._filterElement;
+    _svgFilter = oldSurface._svgFilter;
     oldSurface._childContainer = null;
   }
 
@@ -63,12 +66,22 @@ class PersistedBackdropFilter extends PersistedContainerSurface
     // Do not detach the child container from the root. It is permanently
     // attached. The elements are reused together and are detached from the DOM
     // together.
+    ResourceManager.instance.removeResource(_svgFilter);
+    _svgFilter = null;
     _childContainer = null;
     _filterElement = null;
   }
 
   @override
   void apply() {
+    EngineImageFilter backendFilter;
+    if (filter is ui.ColorFilter) {
+      backendFilter = createHtmlColorFilter(filter as EngineColorFilter)!;
+    } else {
+      backendFilter = filter as EngineImageFilter;
+    }
+    ResourceManager.instance.removeResource(_svgFilter);
+    _svgFilter = null;
     if (_previousTransform != transform) {
       _invertedTransform = Matrix4.inverted(transform!);
       _previousTransform = transform;
@@ -82,7 +95,7 @@ class PersistedBackdropFilter extends PersistedContainerSurface
     // Therefore we need to use parent clip element bounds for
     // backdrop boundary.
     final double dpr = ui.window.devicePixelRatio;
-    final ui.Rect rect = transformRect(_invertedTransform, ui.Rect.fromLTRB(0, 0,
+    final ui.Rect rect = _invertedTransform.transformRect(ui.Rect.fromLTRB(0, 0,
         ui.window.physicalSize.width * dpr,
         ui.window.physicalSize.height * dpr));
     double left = rect.left;
@@ -108,7 +121,7 @@ class PersistedBackdropFilter extends PersistedContainerSurface
       ..top = '${top}px'
       ..width = '${width}px'
       ..height = '${height}px';
-    if (browserEngine == BrowserEngine.firefox) {
+    if (ui_web.browser.browserEngine == ui_web.BrowserEngine.firefox) {
       // For FireFox for now render transparent black background.
       // TODO(ferhat): Switch code to use filter when
       // See https://caniuse.com/#feat=css-backdrop-filter.
@@ -116,14 +129,24 @@ class PersistedBackdropFilter extends PersistedContainerSurface
         ..backgroundColor = '#000'
         ..opacity = '0.2';
     } else {
+      if (backendFilter is ModeHtmlColorFilter) {
+        _svgFilter = backendFilter.makeSvgFilter(_filterElement);
+        /// Some blendModes do not make an svgFilter. See [EngineHtmlColorFilter.makeSvgFilter()]
+        if (_svgFilter == null) {
+            return;
+        }
+      } else if (backendFilter is MatrixHtmlColorFilter) {
+        _svgFilter = backendFilter.makeSvgFilter(_filterElement);
+      }
+
       // CSS uses pixel radius for blur. Flutter & SVG use sigma parameters. For
       // Gaussian blur with standard deviation (normal distribution),
       // the blur will fall within 2 * sigma pixels.
-      if (browserEngine == BrowserEngine.webkit) {
+      if (ui_web.browser.browserEngine == ui_web.BrowserEngine.webkit) {
         setElementStyle(_filterElement!, '-webkit-backdrop-filter',
-            filter.filterAttribute);
+            backendFilter.filterAttribute);
       }
-      setElementStyle(_filterElement!, 'backdrop-filter', filter.filterAttribute);
+      setElementStyle(_filterElement!, 'backdrop-filter', backendFilter.filterAttribute);
     }
   }
 

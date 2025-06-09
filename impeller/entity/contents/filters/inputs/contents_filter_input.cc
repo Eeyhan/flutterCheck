@@ -4,22 +4,35 @@
 
 #include "impeller/entity/contents/filters/inputs/contents_filter_input.h"
 
+#include <optional>
+#include <utility>
+
 namespace impeller {
 
-ContentsFilterInput::ContentsFilterInput(std::shared_ptr<Contents> contents)
-    : contents_(contents) {}
+ContentsFilterInput::ContentsFilterInput(std::shared_ptr<Contents> contents,
+                                         bool msaa_enabled)
+    : contents_(std::move(contents)), msaa_enabled_(msaa_enabled) {}
 
 ContentsFilterInput::~ContentsFilterInput() = default;
 
-FilterInput::Variant ContentsFilterInput::GetInput() const {
-  return contents_;
-}
-
 std::optional<Snapshot> ContentsFilterInput::GetSnapshot(
+    std::string_view label,
     const ContentContext& renderer,
-    const Entity& entity) const {
+    const Entity& entity,
+    std::optional<Rect> coverage_limit,
+    int32_t mip_count) const {
+  if (!coverage_limit.has_value() && entity.GetContents()) {
+    coverage_limit = entity.GetContents()->GetCoverageHint();
+  }
   if (!snapshot_.has_value()) {
-    snapshot_ = contents_->RenderToSnapshot(renderer, entity);
+    snapshot_ = contents_->RenderToSnapshot(renderer,        // renderer
+                                            entity,          // entity
+                                            coverage_limit,  // coverage_limit
+                                            std::nullopt,  // sampler_descriptor
+                                            msaa_enabled_,  // msaa_enabled
+                                            /*mip_count=*/mip_count,  //
+                                            label                     //
+    );
   }
   return snapshot_;
 }

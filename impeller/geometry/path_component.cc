@@ -5,12 +5,161 @@
 #include "path_component.h"
 
 #include <cmath>
+#include <utility>
+
+#include "impeller/geometry/scalar.h"
+#include "impeller/geometry/wangs_formula.h"
 
 namespace impeller {
 
-static const size_t kRecursionLimit = 32;
-static const Scalar kCurveCollinearityEpsilon = 1e-30;
-static const Scalar kCurveAngleToleranceEpsilon = 0.01;
+/////////// FanVertexWriter ///////////
+
+FanVertexWriter::FanVertexWriter(Point* point_buffer, uint16_t* index_buffer)
+    : point_buffer_(point_buffer), index_buffer_(index_buffer) {}
+
+FanVertexWriter::~FanVertexWriter() = default;
+
+size_t FanVertexWriter::GetIndexCount() const {
+  return index_count_;
+}
+
+void FanVertexWriter::EndContour() {
+  if (count_ == 0) {
+    return;
+  }
+  index_buffer_[index_count_++] = 0xFFFF;
+}
+
+void FanVertexWriter::Write(Point point) {
+  index_buffer_[index_count_++] = count_;
+  point_buffer_[count_++] = point;
+}
+
+/////////// StripVertexWriter ///////////
+
+StripVertexWriter::StripVertexWriter(Point* point_buffer,
+                                     uint16_t* index_buffer)
+    : point_buffer_(point_buffer), index_buffer_(index_buffer) {}
+
+StripVertexWriter::~StripVertexWriter() = default;
+
+size_t StripVertexWriter::GetIndexCount() const {
+  return index_count_;
+}
+
+void StripVertexWriter::EndContour() {
+  if (count_ == 0u || contour_start_ == count_ - 1) {
+    // Empty or first contour.
+    return;
+  }
+
+  size_t start = contour_start_;
+  size_t end = count_ - 1;
+
+  index_buffer_[index_count_++] = start;
+
+  size_t a = start + 1;
+  size_t b = end;
+  while (a < b) {
+    index_buffer_[index_count_++] = a;
+    index_buffer_[index_count_++] = b;
+    a++;
+    b--;
+  }
+  if (a == b) {
+    index_buffer_[index_count_++] = a;
+  }
+
+  contour_start_ = count_;
+  index_buffer_[index_count_++] = 0xFFFF;
+}
+
+void StripVertexWriter::Write(Point point) {
+  point_buffer_[count_++] = point;
+}
+
+/////////// LineStripVertexWriter ////////
+
+LineStripVertexWriter::LineStripVertexWriter(std::vector<Point>& points)
+    : points_(points) {}
+
+void LineStripVertexWriter::EndContour() {}
+
+void LineStripVertexWriter::Write(Point point) {
+  if (offset_ >= points_.size()) {
+    overflow_.push_back(point);
+  } else {
+    points_[offset_++] = point;
+  }
+}
+
+const std::vector<Point>& LineStripVertexWriter::GetOversizedBuffer() const {
+  return overflow_;
+}
+
+std::pair<size_t, size_t> LineStripVertexWriter::GetVertexCount() const {
+  return std::make_pair(offset_, overflow_.size());
+}
+
+/////////// GLESVertexWriter ///////////
+
+GLESVertexWriter::GLESVertexWriter(std::vector<Point>& points,
+                                   std::vector<uint16_t>& indices)
+    : points_(points), indices_(indices) {}
+
+void GLESVertexWriter::EndContour() {
+  if (points_.size() == 0u || contour_start_ == points_.size() - 1) {
+    // Empty or first contour.
+    return;
+  }
+
+  auto start = contour_start_;
+  auto end = points_.size() - 1;
+  // All filled paths are drawn as if they are closed, but if
+  // there is an explicit close then a lineTo to the origin
+  // is inserted. This point isn't strictly necesary to
+  // correctly render the shape and can be dropped.
+  if (points_[end] == points_[start]) {
+    end--;
+  }
+
+  // Triangle strip break for subsequent contours
+  if (contour_start_ != 0) {
+    auto back = indices_.back();
+    indices_.push_back(back);
+    indices_.push_back(start);
+    indices_.push_back(start);
+
+    // If the contour has an odd number of points, insert an extra point when
+    // bridging to the next contour to preserve the correct triangle winding
+    // order.
+    if (previous_contour_odd_points_) {
+      indices_.push_back(start);
+    }
+  } else {
+    indices_.push_back(start);
+  }
+
+  size_t a = start + 1;
+  size_t b = end;
+  while (a < b) {
+    indices_.push_back(a);
+    indices_.push_back(b);
+    a++;
+    b--;
+  }
+  if (a == b) {
+    indices_.push_back(a);
+    previous_contour_odd_points_ = false;
+  } else {
+    previous_contour_odd_points_ = true;
+  }
+  contour_start_ = points_.size();
+}
+
+void GLESVertexWriter::Write(Point point) {
+  points_.push_back(point);
+}
 
 /*
  *  Based on: https://en.wikipedia.org/wiki/B%C3%A9zier_curve#Specific_cases
@@ -63,12 +212,29 @@ Point LinearPathComponent::Solve(Scalar time) const {
   };
 }
 
-std::vector<Point> LinearPathComponent::CreatePolyline() const {
-  return {p2};
+void LinearPathComponent::AppendPolylinePoints(
+    std::vector<Point>& points) const {
+  if (points.size() == 0 || points.back() != p2) {
+    points.push_back(p2);
+  }
 }
 
 std::vector<Point> LinearPathComponent::Extrema() const {
   return {p1, p2};
+}
+
+std::optional<Vector2> LinearPathComponent::GetStartDirection() const {
+  if (p1 == p2) {
+    return std::nullopt;
+  }
+  return (p1 - p2).Normalize();
+}
+
+std::optional<Vector2> LinearPathComponent::GetEndDirection() const {
+  if (p1 == p2) {
+    return std::nullopt;
+  }
+  return (p2 - p1).Normalize();
 }
 
 Point QuadraticPathComponent::Solve(Scalar time) const {
@@ -85,15 +251,62 @@ Point QuadraticPathComponent::SolveDerivative(Scalar time) const {
   };
 }
 
-std::vector<Point> QuadraticPathComponent::CreatePolyline(
-    const SmoothingApproximation& approximation) const {
-  CubicPathComponent elevated(*this);
-  return elevated.CreatePolyline(approximation);
+void QuadraticPathComponent::ToLinearPathComponents(
+    Scalar scale,
+    VertexWriter& writer) const {
+  Scalar line_count = std::ceilf(ComputeQuadradicSubdivisions(scale, *this));
+  for (size_t i = 1; i < line_count; i += 1) {
+    writer.Write(Solve(i / line_count));
+  }
+  writer.Write(p2);
+}
+
+void QuadraticPathComponent::AppendPolylinePoints(
+    Scalar scale_factor,
+    std::vector<Point>& points) const {
+  ToLinearPathComponents(scale_factor, [&points](const Point& point) {
+    points.emplace_back(point);
+  });
+}
+
+void QuadraticPathComponent::ToLinearPathComponents(
+    Scalar scale_factor,
+    const PointProc& proc) const {
+  Scalar line_count =
+      std::ceilf(ComputeQuadradicSubdivisions(scale_factor, *this));
+  for (size_t i = 1; i < line_count; i += 1) {
+    proc(Solve(i / line_count));
+  }
+  proc(p2);
+}
+
+size_t QuadraticPathComponent::CountLinearPathComponents(Scalar scale) const {
+  return std::ceilf(ComputeQuadradicSubdivisions(scale, *this)) + 2;
 }
 
 std::vector<Point> QuadraticPathComponent::Extrema() const {
   CubicPathComponent elevated(*this);
   return elevated.Extrema();
+}
+
+std::optional<Vector2> QuadraticPathComponent::GetStartDirection() const {
+  if (p1 != cp) {
+    return (p1 - cp).Normalize();
+  }
+  if (p1 != p2) {
+    return (p1 - p2).Normalize();
+  }
+  return std::nullopt;
+}
+
+std::optional<Vector2> QuadraticPathComponent::GetEndDirection() const {
+  if (p2 != cp) {
+    return (p2 - cp).Normalize();
+  }
+  if (p2 != p1) {
+    return (p2 - p1).Normalize();
+  }
+  return std::nullopt;
 }
 
 Point CubicPathComponent::Solve(Scalar time) const {
@@ -110,238 +323,48 @@ Point CubicPathComponent::SolveDerivative(Scalar time) const {
   };
 }
 
-/*
- *  Paul de Casteljau's subdivision with modifications as described in
- *  http://agg.sourceforge.net/antigrain.com/research/adaptive_bezier/index.html.
- *  Refer to the diagram on that page for a description of the points.
- */
-static void CubicPathSmoothenRecursive(const SmoothingApproximation& approx,
-                                       std::vector<Point>& points,
-                                       Point p1,
-                                       Point p2,
-                                       Point p3,
-                                       Point p4,
-                                       size_t level) {
-  if (level >= kRecursionLimit) {
-    return;
-  }
-
-  /*
-   *  Find all midpoints.
-   */
-  auto p12 = (p1 + p2) / 2.0;
-  auto p23 = (p2 + p3) / 2.0;
-  auto p34 = (p3 + p4) / 2.0;
-
-  auto p123 = (p12 + p23) / 2.0;
-  auto p234 = (p23 + p34) / 2.0;
-
-  auto p1234 = (p123 + p234) / 2.0;
-
-  /*
-   *  Attempt approximation using single straight line.
-   */
-  auto d = p4 - p1;
-  Scalar d2 = fabs(((p2.x - p4.x) * d.y - (p2.y - p4.y) * d.x));
-  Scalar d3 = fabs(((p3.x - p4.x) * d.y - (p3.y - p4.y) * d.x));
-
-  Scalar da1 = 0;
-  Scalar da2 = 0;
-  Scalar k = 0;
-
-  switch ((static_cast<int>(d2 > kCurveCollinearityEpsilon) << 1) +
-          static_cast<int>(d3 > kCurveCollinearityEpsilon)) {
-    case 0:
-      /*
-       *  All collinear OR p1 == p4.
-       */
-      k = d.x * d.x + d.y * d.y;
-      if (k == 0) {
-        d2 = p1.GetDistanceSquared(p2);
-        d3 = p4.GetDistanceSquared(p3);
-      } else {
-        k = 1.0 / k;
-        da1 = p2.x - p1.x;
-        da2 = p2.y - p1.y;
-        d2 = k * (da1 * d.x + da2 * d.y);
-        da1 = p3.x - p1.x;
-        da2 = p3.y - p1.y;
-        d3 = k * (da1 * d.x + da2 * d.y);
-
-        if (d2 > 0 && d2 < 1 && d3 > 0 && d3 < 1) {
-          /*
-           *  Simple collinear case, 1---2---3---4. Leave just two endpoints.
-           */
-          return;
-        }
-
-        if (d2 <= 0) {
-          d2 = p2.GetDistanceSquared(p1);
-        } else if (d2 >= 1) {
-          d2 = p2.GetDistanceSquared(p4);
-        } else {
-          d2 = p2.GetDistanceSquared({p1.x + d2 * d.x, p1.y + d2 * d.y});
-        }
-
-        if (d3 <= 0) {
-          d3 = p3.GetDistanceSquared(p1);
-        } else if (d3 >= 1) {
-          d3 = p3.GetDistanceSquared(p4);
-        } else {
-          d3 = p3.GetDistanceSquared({p1.x + d3 * d.x, p1.y + d3 * d.y});
-        }
-      }
-
-      if (d2 > d3) {
-        if (d2 < approx.distance_tolerance_square) {
-          points.emplace_back(p2);
-          return;
-        }
-      } else {
-        if (d3 < approx.distance_tolerance_square) {
-          points.emplace_back(p3);
-          return;
-        }
-      }
-      break;
-    case 1:
-      /*
-       *  p1, p2, p4 are collinear, p3 is significant.
-       */
-      if (d3 * d3 <=
-          approx.distance_tolerance_square * (d.x * d.x + d.y * d.y)) {
-        if (approx.angle_tolerance < kCurveAngleToleranceEpsilon) {
-          points.emplace_back(p23);
-          return;
-        }
-
-        /*
-         *  Angle Condition.
-         */
-        da1 = ::fabs(::atan2(p4.y - p3.y, p4.x - p3.x) -
-                     ::atan2(p3.y - p2.y, p3.x - p2.x));
-
-        if (da1 >= kPi) {
-          da1 = 2.0 * kPi - da1;
-        }
-
-        if (da1 < approx.angle_tolerance) {
-          points.emplace_back(p2);
-          points.emplace_back(p3);
-          return;
-        }
-
-        if (approx.cusp_limit != 0.0) {
-          if (da1 > approx.cusp_limit) {
-            points.emplace_back(p3);
-            return;
-          }
-        }
-      }
-      break;
-
-    case 2:
-      /*
-       *  p1,p3,p4 are collinear, p2 is significant.
-       */
-      if (d2 * d2 <=
-          approx.distance_tolerance_square * (d.x * d.x + d.y * d.y)) {
-        if (approx.angle_tolerance < kCurveAngleToleranceEpsilon) {
-          points.emplace_back(p23);
-          return;
-        }
-
-        /*
-         *  Angle Condition.
-         */
-        da1 = ::fabs(::atan2(p3.y - p2.y, p3.x - p2.x) -
-                     ::atan2(p2.y - p1.y, p2.x - p1.x));
-
-        if (da1 >= kPi) {
-          da1 = 2.0 * kPi - da1;
-        }
-
-        if (da1 < approx.angle_tolerance) {
-          points.emplace_back(p2);
-          points.emplace_back(p3);
-          return;
-        }
-
-        if (approx.cusp_limit != 0.0) {
-          if (da1 > approx.cusp_limit) {
-            points.emplace_back(p2);
-            return;
-          }
-        }
-      }
-      break;
-
-    case 3:
-      /*
-       *  Regular case.
-       */
-      if ((d2 + d3) * (d2 + d3) <=
-          approx.distance_tolerance_square * (d.x * d.x + d.y * d.y)) {
-        /*
-         *  If the curvature doesn't exceed the distance_tolerance value
-         *  we tend to finish subdivisions.
-         */
-        if (approx.angle_tolerance < kCurveAngleToleranceEpsilon) {
-          points.emplace_back(p23);
-          return;
-        }
-
-        /*
-         *  Angle & Cusp Condition.
-         */
-        k = ::atan2(p3.y - p2.y, p3.x - p2.x);
-        da1 = ::fabs(k - ::atan2(p2.y - p1.y, p2.x - p1.x));
-        da2 = ::fabs(::atan2(p4.y - p3.y, p4.x - p3.x) - k);
-
-        if (da1 >= kPi) {
-          da1 = 2.0 * kPi - da1;
-        }
-
-        if (da2 >= kPi) {
-          da2 = 2.0 * kPi - da2;
-        }
-
-        if (da1 + da2 < approx.angle_tolerance) {
-          /*
-           *  Finally we can stop the recursion.
-           */
-          points.emplace_back(p23);
-          return;
-        }
-
-        if (approx.cusp_limit != 0.0) {
-          if (da1 > approx.cusp_limit) {
-            points.emplace_back(p2);
-            return;
-          }
-
-          if (da2 > approx.cusp_limit) {
-            points.emplace_back(p3);
-            return;
-          }
-        }
-      }
-      break;
-  }
-
-  /*
-   *  Continue subdivision.
-   */
-  CubicPathSmoothenRecursive(approx, points, p1, p12, p123, p1234, level + 1);
-  CubicPathSmoothenRecursive(approx, points, p1234, p234, p34, p4, level + 1);
+void CubicPathComponent::AppendPolylinePoints(
+    Scalar scale,
+    std::vector<Point>& points) const {
+  ToLinearPathComponents(
+      scale, [&points](const Point& point) { points.emplace_back(point); });
 }
 
-std::vector<Point> CubicPathComponent::CreatePolyline(
-    const SmoothingApproximation& approximation) const {
-  std::vector<Point> points;
-  CubicPathSmoothenRecursive(approximation, points, p1, cp1, cp2, p2, 0);
-  points.emplace_back(p2);
-  return points;
+void CubicPathComponent::ToLinearPathComponents(Scalar scale,
+                                                VertexWriter& writer) const {
+  Scalar line_count = std::ceilf(ComputeCubicSubdivisions(scale, *this));
+  for (size_t i = 1; i < line_count; i++) {
+    writer.Write(Solve(i / line_count));
+  }
+  writer.Write(p2);
+}
+
+size_t CubicPathComponent::CountLinearPathComponents(Scalar scale) const {
+  return std::ceilf(ComputeCubicSubdivisions(scale, *this)) + 2;
+}
+
+inline QuadraticPathComponent CubicPathComponent::Lower() const {
+  return QuadraticPathComponent(3.0 * (cp1 - p1), 3.0 * (cp2 - cp1),
+                                3.0 * (p2 - cp2));
+}
+
+CubicPathComponent CubicPathComponent::Subsegment(Scalar t0, Scalar t1) const {
+  auto p0 = Solve(t0);
+  auto p3 = Solve(t1);
+  auto d = Lower();
+  auto scale = (t1 - t0) * (1.0 / 3.0);
+  auto p1 = p0 + scale * d.Solve(t0);
+  auto p2 = p3 - scale * d.Solve(t1);
+  return CubicPathComponent(p0, p1, p2, p3);
+}
+
+void CubicPathComponent::ToLinearPathComponents(Scalar scale,
+                                                const PointProc& proc) const {
+  Scalar line_count = std::ceilf(ComputeCubicSubdivisions(scale, *this));
+  for (size_t i = 1; i < line_count; i++) {
+    proc(Solve(i / line_count));
+  }
+  proc(p2);
 }
 
 static inline bool NearEqual(Scalar a, Scalar b, Scalar epsilon) {
@@ -384,15 +407,23 @@ static void CubicPathBoundingPopulateValues(std::vector<Scalar>& values,
 
   Scalar rootB2Minus4AC = ::sqrt(b2Minus4AC);
 
+  /* From Numerical Recipes in C.
+   *
+   * q = -1/2 (b + sign(b) sqrt[b^2 - 4ac])
+   * x1 = q / a
+   * x2 = c / q
+   */
+  Scalar q = (b < 0) ? -(b - rootB2Minus4AC) / 2 : -(b + rootB2Minus4AC) / 2;
+
   {
-    Scalar t = (-b + rootB2Minus4AC) / (2.0 * a);
+    Scalar t = q / a;
     if (t >= 0.0 && t <= 1.0) {
       values.emplace_back(t);
     }
   }
 
   {
-    Scalar t = (-b - rootB2Minus4AC) / (2.0 * a);
+    Scalar t = c / q;
     if (t >= 0.0 && t <= 1.0) {
       values.emplace_back(t);
     }
@@ -415,6 +446,32 @@ std::vector<Point> CubicPathComponent::Extrema() const {
   }
 
   return points;
+}
+
+std::optional<Vector2> CubicPathComponent::GetStartDirection() const {
+  if (p1 != cp1) {
+    return (p1 - cp1).Normalize();
+  }
+  if (p1 != cp2) {
+    return (p1 - cp2).Normalize();
+  }
+  if (p1 != p2) {
+    return (p1 - p2).Normalize();
+  }
+  return std::nullopt;
+}
+
+std::optional<Vector2> CubicPathComponent::GetEndDirection() const {
+  if (p2 != cp2) {
+    return (p2 - cp2).Normalize();
+  }
+  if (p2 != cp1) {
+    return (p2 - cp1).Normalize();
+  }
+  if (p2 != p1) {
+    return (p2 - p1).Normalize();
+  }
+  return std::nullopt;
 }
 
 }  // namespace impeller

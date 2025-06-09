@@ -8,15 +8,14 @@
 #include "flutter/fml/macros.h"
 #include "flutter/fml/memory/ref_ptr.h"
 #include "flutter/testing/test_vulkan_image.h"
+#include "flutter/vulkan/procs/vulkan_proc_table.h"
 #include "flutter/vulkan/vulkan_application.h"
 #include "flutter/vulkan/vulkan_device.h"
-#include "flutter/vulkan/vulkan_proc_table.h"
 
 #include "third_party/skia/include/core/SkSize.h"
-#include "third_party/skia/include/gpu/GrDirectContext.h"
+#include "third_party/skia/include/gpu/ganesh/GrDirectContext.h"
 
-namespace flutter {
-namespace testing {
+namespace flutter::testing {
 
 class TestVulkanContext : public fml::RefCountedThreadSafe<TestVulkanContext> {
  public:
@@ -42,7 +41,6 @@ class TestVulkanContext : public fml::RefCountedThreadSafe<TestVulkanContext> {
   FML_DISALLOW_COPY_AND_ASSIGN(TestVulkanContext);
 };
 
-}  // namespace testing
-}  // namespace flutter
+}  // namespace flutter::testing
 
 #endif  // FLUTTER_TESTING_TEST_VULKAN_CONTEXT_H_

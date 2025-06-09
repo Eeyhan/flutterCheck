@@ -8,25 +8,41 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:image/image.dart';
-import 'package:pedantic/pedantic.dart';
-import 'package:test_api/src/backend/runtime.dart';
+import 'package:path/path.dart' as path;
+import 'package:test_api/backend.dart';
 import 'package:webkit_inspection_protocol/webkit_inspection_protocol.dart'
     as wip;
 
 import 'browser.dart';
-import 'browser_lock.dart';
 import 'browser_process.dart';
 import 'chrome_installer.dart';
 import 'common.dart';
 import 'environment.dart';
+import 'package_lock.dart';
+
+const String kBlankPageUrl = 'about:blank';
 
 /// Provides an environment for desktop Chrome.
 class ChromeEnvironment implements BrowserEnvironment {
+  ChromeEnvironment({
+    required bool useDwarf,
+  }) : _useDwarf = useDwarf;
+
   late final BrowserInstallation _installation;
 
+  final bool _useDwarf;
+
   @override
-  Future<Browser> launchBrowserInstance(Uri url, {bool debug = false}) async {
-    return Chrome(url, _installation, debug: debug);
+  Future<Browser> launchBrowserInstance(
+    Uri url, {
+    bool debug = false,
+  }) async {
+    return Chrome(
+      url,
+      _installation,
+      debug: debug,
+      useDwarf: _useDwarf
+    );
   }
 
   @override
@@ -34,10 +50,10 @@ class ChromeEnvironment implements BrowserEnvironment {
 
   @override
   Future<void> prepare() async {
-    final String version = browserLock.chromeLock.versionForCurrentPlatform;
+    final String version = packageLock.chromeLock.version;
     _installation = await getOrInstallChrome(
       version,
-      infoLog: isCirrus ? stdout : DevNull(),
+      infoLog: isCi ? stdout : DevNull(),
     );
   }
 
@@ -59,15 +75,16 @@ class ChromeEnvironment implements BrowserEnvironment {
 ///
 /// Any errors starting or running the process are reported through [onExit].
 class Chrome extends Browser {
-  final BrowserProcess _process;
-
-  @override
-  final Future<Uri> remoteDebuggerUrl;
-
   /// Starts a new instance of Chrome open to the given [url], which may be a
   /// [Uri] or a [String].
-  factory Chrome(Uri url, BrowserInstallation installation, {bool debug = false}) {
+  factory Chrome(
+    Uri url,
+    BrowserInstallation installation, {
+    required bool debug,
+    required bool useDwarf,
+  }) {
     final Completer<Uri> remoteDebuggerCompleter = Completer<Uri>.sync();
+    final Completer<String> exceptionCompleter = Completer<String>();
     return Chrome._(BrowserProcess(() async {
       // A good source of various Chrome CLI options:
       // https://peter.sh/experiments/chromium-command-line-switches/
@@ -81,10 +98,10 @@ class Chrome extends Browser {
       // --disable-font-subpixel-positioning
       final bool isChromeNoSandbox =
           Platform.environment['CHROME_NO_SANDBOX'] == 'true';
-      final String dir = environment.webUiDartToolDir.createTempSync('test_chrome_user_data_').resolveSymbolicLinksSync();
+      final String dir = await generateUserDirectory(installation, useDwarf);
       final List<String> args = <String>[
         '--user-data-dir=$dir',
-        url.toString(),
+        kBlankPageUrl,
         if (!debug)
           '--headless',
         if (isChromeNoSandbox)
@@ -97,7 +114,13 @@ class Chrome extends Browser {
           '--start-maximized',
         if (debug)
           '--auto-open-devtools-for-tabs',
-        '--disable-extensions',
+        if (useDwarf)
+          '--devtools-flags=enabledExperiments=wasmDWARFDebugging',
+        // Always run unit tests at a 1x scale factor
+        '--force-device-scale-factor=1',
+        if (!useDwarf)
+          // DWARF debugging requires a Chrome extension.
+          '--disable-extensions',
         '--disable-popup-blocking',
         // Indicates that the browser is in "browse without sign-in" (Guest session) mode.
         '--bwsi',
@@ -106,10 +129,20 @@ class Chrome extends Browser {
         '--disable-default-apps',
         '--disable-translate',
         '--remote-debugging-port=$kDevtoolsPort',
+
+        // SwiftShader support on ARM macs is disabled until they upgrade to a newer
+        // version of LLVM, see https://issuetracker.google.com/issues/165000222. In
+        // headless Chrome, the default is to use SwiftShader as a software renderer
+        // for WebGL contexts. In order to work around this limitation, we can force
+        // GPU rendering with this flag.
+        if (environment.isMacosArm)
+          '--use-angle=metal',
       ];
 
       final Process process =
           await _spawnChromiumProcess(installation.executable, args);
+
+      await setupChromiumTab(url, exceptionCompleter);
 
       remoteDebuggerCompleter.complete(
           getRemoteDebuggerUrl(Uri.parse('http://localhost:$kDevtoolsPort')));
@@ -118,13 +151,81 @@ class Chrome extends Browser {
           .then((_) => Directory(dir).deleteSync(recursive: true)));
 
       return process;
-    }), remoteDebuggerCompleter.future);
+    }), remoteDebuggerCompleter.future, exceptionCompleter.future);
   }
 
-  Chrome._(this._process, this.remoteDebuggerUrl);
+  Chrome._(this._process, this.remoteDebuggerUrl, this._onUncaughtException);
+
+  static Future<String> generateUserDirectory(
+    BrowserInstallation installation,
+    bool useDwarf
+  ) async {
+    final String userDirectoryPath = environment
+        .webUiDartToolDir
+        .createTempSync('test_chrome_user_data_')
+        .resolveSymbolicLinksSync();
+    if (!useDwarf) {
+      return userDirectoryPath;
+    }
+
+    // Using DWARF debugging info requires installation of a Chrome extension.
+    // We can prompt for this, but in order to avoid prompting on every single
+    // browser launch, we cache the user directory after it has been installed.
+    final Directory baselineUserDirectory = Directory(path.join(
+      environment.webUiDartToolDir.path,
+      'chrome_user_data_base',
+    ));
+    final Directory dwarfExtensionInstallDirectory = Directory(path.join(
+      baselineUserDirectory.path,
+      'Default',
+      'Extensions',
+      // This is the ID of the dwarf debugging extension.
+      'pdcpmagijalfljmkmjngeonclgbbannb',
+    ));
+    if (!baselineUserDirectory.existsSync()) {
+      baselineUserDirectory.createSync(recursive: true);
+    }
+    if (!dwarfExtensionInstallDirectory.existsSync()) {
+      print('DWARF debugging requested. Launching Chrome. Please install the '
+            'extension and then exit Chrome when the installation is complete...');
+      final Process addExtension = await Process.start(
+        installation.executable,
+        <String>[
+          '--user-data-dir=${baselineUserDirectory.path}',
+          'https://goo.gle/wasm-debugging-extension',
+          '--bwsi',
+          '--no-first-run',
+          '--no-default-browser-check',
+          '--disable-default-apps',
+          '--disable-translate',
+        ]
+      );
+      await addExtension.exitCode;
+    }
+    for (final FileSystemEntity input in baselineUserDirectory.listSync(recursive: true)) {
+      final String relative = path.relative(input.path, from: baselineUserDirectory.path);
+      final String outputPath = path.join(userDirectoryPath, relative);
+      if (input is Directory) {
+        await Directory(outputPath).create(recursive: true);
+      } else if (input is File) {
+        await input.copy(outputPath);
+      }
+    }
+    return userDirectoryPath;
+  }
+
+  final BrowserProcess _process;
+
+  final Future<String> _onUncaughtException;
+
+  @override
+  final Future<Uri> remoteDebuggerUrl;
 
   @override
   Future<void> get onExit => _process.onExit;
+
+  @override
+  Future<String>? get onUncaughtException => _onUncaughtException;
 
   @override
   Future<void> close() => _process.close();
@@ -280,10 +381,35 @@ Future<Uri> getRemoteDebuggerUrl(Uri base) async {
     final HttpClientResponse response = await request.close();
     final List<dynamic>? jsonObject =
         await json.fuse(utf8).decoder.bind(response).single as List<dynamic>?;
-    return base.resolve(jsonObject!.first['devtoolsFrontendUrl'] as String);
+    return base.resolve((jsonObject!.first as Map<dynamic, dynamic>)['devtoolsFrontendUrl'] as String);
   } catch (_) {
     // If we fail to talk to the remote debugger protocol, give up and return
     // the raw URL rather than crashing.
     return base;
   }
+}
+
+Future<void> setupChromiumTab(
+    Uri url, Completer<String> exceptionCompleter) async {
+  final wip.ChromeConnection chromeConnection =
+      wip.ChromeConnection('localhost', kDevtoolsPort);
+  final wip.ChromeTab? chromeTab = await chromeConnection.getTab(
+      (wip.ChromeTab chromeTab) => chromeTab.url == kBlankPageUrl);
+  final wip.WipConnection wipConnection = await chromeTab!.connect();
+
+  await wipConnection.runtime.enable();
+
+  wipConnection.runtime.onExceptionThrown.listen(
+    (wip.ExceptionThrownEvent event) {
+      if (!exceptionCompleter.isCompleted) {
+        final String text = event.exceptionDetails.text;
+        final String? description = event.exceptionDetails.exception?.description;
+        exceptionCompleter.complete('$text: $description');
+      }
+    }
+  );
+
+  await wipConnection.page.enable();
+
+  await wipConnection.page.navigate(url.toString());
 }

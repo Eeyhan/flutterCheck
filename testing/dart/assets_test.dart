@@ -7,7 +7,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:ui';
 
-import 'package:litetest/litetest.dart';
+import 'package:test/test.dart';
 
 void main() {
   test('Loading an asset that does not exist returns null', () async {
@@ -21,8 +21,25 @@ void main() {
     expect(error is Exception, true);
   });
 
+  test('Loading a file that does not exist returns null', () async {
+    Object? error;
+    try {
+      await ImmutableBuffer.fromFilePath('ThisDoesNotExist');
+    } catch (err) {
+      error = err;
+    }
+    expect(error, isNotNull);
+    expect(error is Exception, true);
+  });
+
   test('returns the bytes of a bundled asset', () async {
     final ImmutableBuffer buffer = await ImmutableBuffer.fromAsset('DashInNooglerHat.jpg');
+
+    expect(buffer.length == 354679, true);
+  });
+
+  test('returns the bytes of a file', () async {
+    final ImmutableBuffer buffer = await ImmutableBuffer.fromFilePath('flutter/lib/ui/fixtures/DashInNooglerHat.jpg');
 
     expect(buffer.length == 354679, true);
   });
@@ -51,9 +68,9 @@ void main() {
 
   test('Tester can still load through dart:ui', () async {
     /// Manually load font asset through dart.
-    final Uint8List encoded = utf8.encoder.convert(Uri(path: Uri.encodeFull('Roboto-Medium.ttf')).path);
+    final Uint8List encoded = utf8.encode(Uri(path: Uri.encodeFull('Roboto-Medium.ttf')).path);
     final Completer<Uint8List> result = Completer<Uint8List>();
-    window.sendPlatformMessage('flutter/assets', encoded.buffer.asByteData(), (ByteData? data) {
+    PlatformDispatcher.instance.sendPlatformMessage('flutter/assets', encoded.buffer.asByteData(), (ByteData? data) {
       result.complete(data!.buffer.asUint8List());
     });
 
@@ -64,7 +81,7 @@ void main() {
     final List<int> bundledFontImage = await _createPictureFromFont('Roboto2');
     // Bundling fonts is disabled, so the font selected in both cases should be ahem.
     // Therefore each buffer will contain identical contents.
-    expect(ahemImage, notEquals(bundledFontImage));
+    expect(ahemImage, isNot(bundledFontImage));
   });
 }
 

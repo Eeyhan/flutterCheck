@@ -2,8 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef FLUTTER_FLOW_LAYER_RASTER_CACHE_ITEM_H_
-#define FLUTTER_FLOW_LAYER_RASTER_CACHE_ITEM_H_
+#ifndef FLUTTER_FLOW_LAYERS_LAYER_RASTER_CACHE_ITEM_H_
+#define FLUTTER_FLOW_LAYERS_LAYER_RASTER_CACHE_ITEM_H_
+
+#if !SLIMPELLER
 
 #include <memory>
 #include <optional>
@@ -31,16 +33,16 @@ class LayerRasterCacheItem : public RasterCacheItem {
 
   std::optional<RasterCacheKeyID> GetId() const override;
 
-  void PrerollSetup(PrerollContext* context, const SkMatrix& matrix) override;
+  void PrerollSetup(PrerollContext* context, const DlMatrix& matrix) override;
 
   void PrerollFinalize(PrerollContext* context,
-                       const SkMatrix& matrix) override;
+                       const DlMatrix& matrix) override;
 
-  bool Draw(const PaintContext& context, const SkPaint* paint) const override;
+  bool Draw(const PaintContext& context, const DlPaint* paint) const override;
 
   bool Draw(const PaintContext& context,
-            SkCanvas* canvas,
-            const SkPaint* paint) const override;
+            DlCanvas* canvas,
+            const DlPaint* paint) const override;
 
   bool TryToPrepareRasterCache(const PaintContext& context,
                                bool parent_cached = false) const override;
@@ -69,4 +71,6 @@ class LayerRasterCacheItem : public RasterCacheItem {
 
 }  // namespace flutter
 
-#endif  // FLUTTER_FLOW_LAYER_RASTER_CACHE_ITEM_H_
+#endif  //  !SLIMPELLER
+
+#endif  // FLUTTER_FLOW_LAYERS_LAYER_RASTER_CACHE_ITEM_H_

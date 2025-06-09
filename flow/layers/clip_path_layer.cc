@@ -6,30 +6,16 @@
 
 namespace flutter {
 
-ClipPathLayer::ClipPathLayer(const SkPath& clip_path, Clip clip_behavior)
+ClipPathLayer::ClipPathLayer(const DlPath& clip_path, Clip clip_behavior)
     : ClipShapeLayer(clip_path, clip_behavior) {}
 
-void ClipPathLayer::Preroll(PrerollContext* context, const SkMatrix& matrix) {
-  TRACE_EVENT0("flutter", "ClipPathLayer::Preroll");
-  ClipShapeLayer::Preroll(context, matrix);
+const DlRect ClipPathLayer::clip_shape_bounds() const {
+  return clip_shape().GetBounds();
 }
 
-void ClipPathLayer::Paint(PaintContext& context) const {
-  TRACE_EVENT0("flutter", "ClipPathLayer::Paint");
-  ClipShapeLayer::Paint(context);
-}
-
-const SkRect& ClipPathLayer::clip_shape_bounds() const {
-  return clip_shape().getBounds();
-}
-
-void ClipPathLayer::OnMutatorsStackPushClipShape(
-    MutatorsStack& mutators_stack) {
-  mutators_stack.PushClipPath(clip_shape());
-}
-
-void ClipPathLayer::OnCanvasClipShape(SkCanvas* canvas) const {
-  canvas->clipPath(clip_shape(), clip_behavior() != Clip::hardEdge);
+void ClipPathLayer::ApplyClip(LayerStateStack::MutatorContext& mutator) const {
+  clip_shape().WillRenderSkPath();
+  mutator.clipPath(clip_shape(), clip_behavior() != Clip::kHardEdge);
 }
 
 }  // namespace flutter
